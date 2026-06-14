@@ -2,8 +2,6 @@
   <img src="./assets/kasagumo-logo.png" width="420" alt="Kasagumo Logo">
 </p>
 
-<h1 align="center">KASAGUMO</h1>
-
 <p align="center">
   A decentralized cloud built in Rust.
 </p>
