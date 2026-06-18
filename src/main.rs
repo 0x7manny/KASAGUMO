@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::Path;
 use sha2::{Digest, Sha256};
 
-static CHUNK_SIZE: usize = 1024;
+static CHUNK_SIZE: usize = 1024 * 1024;
 
 fn main() {
     let file_primitive = FilePrimitive::createFromFile("./assets/kasagumo-logo.png");
