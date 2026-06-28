@@ -4,17 +4,16 @@ use anyhow::Context;
 use kasagumo::FilePrimitive;
 
 use crate::cli::{NodeAction, RunArgs};
+use crate::protocol::{Request, Response};
+use crate::{client, daemon};
 
 fn not_yet(command: &str) -> anyhow::Result<()> {
     anyhow::bail!("`kgo {command}` n'est pas encore implémenté (prévu en M1)")
 }
 
-pub fn node(action: NodeAction) -> anyhow::Result<()> {
+pub async fn node(action: NodeAction, data_dir: &Path) -> anyhow::Result<()> {
     match action {
-        NodeAction::Start { port, data_dir } => {
-            println!("nœud demandé : port {port}, données dans {}", data_dir.display());
-            not_yet("node start")
-        }
+        NodeAction::Start { port: _ } => daemon::serve(data_dir).await,
     }
 }
 
@@ -32,8 +31,18 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     not_yet("run")
 }
 
-pub fn ps(_all: bool) -> anyhow::Result<()> {
-    not_yet("ps")
+pub async fn ps(all: bool, data_dir: &Path) -> anyhow::Result<()> {
+    match client::send(data_dir, &Request::Ps { all }).await? {
+        Response::Workloads(workloads) if workloads.is_empty() => println!("aucun workload"),
+        Response::Workloads(workloads) => {
+            println!("{:<14} {:<24} STATUT", "ID", "IMAGE");
+            for w in workloads {
+                println!("{:<14} {:<24} {}", w.id, w.image, w.status);
+            }
+        }
+        Response::Error(e) => anyhow::bail!("{e}"),
+    }
+    Ok(())
 }
 
 pub fn stop(workload_id: &str) -> anyhow::Result<()> {

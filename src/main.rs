@@ -1,5 +1,8 @@
 mod cli;
+mod client;
 mod commands;
+mod daemon;
+mod protocol;
 
 use std::process::ExitCode;
 
@@ -7,14 +10,15 @@ use clap::Parser;
 
 use cli::{Cli, Command};
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Node { action } => commands::node(action),
+        Command::Node { action } => commands::node(action, &cli.data_dir).await,
         Command::Nodes => commands::nodes(),
         Command::Run(args) => commands::run(args),
-        Command::Ps { all } => commands::ps(all),
+        Command::Ps { all } => commands::ps(all, &cli.data_dir).await,
         Command::Stop { workload_id } => commands::stop(&workload_id),
         Command::Chunk { path } => commands::chunk(&path),
     };

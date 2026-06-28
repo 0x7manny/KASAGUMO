@@ -5,6 +5,10 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "kgo", version, about = "Kasagumo — un cloud décentralisé écrit en Rust")]
 pub struct Cli {
+    /// Dossier de données du nœud (contient le socket du daemon)
+    #[arg(long, global = true, default_value = ".kasagumo")]
+    pub data_dir: PathBuf,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -45,9 +49,6 @@ pub enum NodeAction {
         /// Port d'écoute
         #[arg(long, default_value_t = 7070)]
         port: u16,
-        /// Dossier de données du nœud
-        #[arg(long, default_value = ".kasagumo")]
-        data_dir: PathBuf,
     },
 }
 
