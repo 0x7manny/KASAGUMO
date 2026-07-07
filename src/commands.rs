@@ -5,6 +5,7 @@ use kasagumo::FilePrimitive;
 
 use crate::cli::{NodeAction, RunArgs};
 use crate::protocol::{Request, Response};
+use crate::workload::WorkloadSpec;
 use crate::{client, daemon};
 
 fn not_yet(command: &str) -> anyhow::Result<()> {
@@ -21,33 +22,52 @@ pub fn nodes() -> anyhow::Result<()> {
     not_yet("nodes")
 }
 
-pub fn run(args: RunArgs) -> anyhow::Result<()> {
-    println!(
-        "workload demandé : {} ({} CPU, {} Mo)",
-        args.image,
-        args.cpu,
-        args.memory >> 20
-    );
-    not_yet("run")
+pub async fn run(args: RunArgs, data_dir: &Path) -> anyhow::Result<()> {
+    let spec = WorkloadSpec {
+        image: args.image,
+        cpu: args.cpu,
+        memory: args.memory,
+    };
+    match client::send(data_dir, &Request::Run(spec)).await? {
+        Response::Started(w) => println!("{} ({}) : {}", w.id, w.spec.image, w.state),
+        Response::Error(e) => anyhow::bail!("{e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
+    }
+    Ok(())
 }
 
 pub async fn ps(all: bool, data_dir: &Path) -> anyhow::Result<()> {
     match client::send(data_dir, &Request::Ps { all }).await? {
         Response::Workloads(workloads) if workloads.is_empty() => println!("aucun workload"),
         Response::Workloads(workloads) => {
-            println!("{:<14} {:<24} STATUT", "ID", "IMAGE");
+            println!("{:<10} {:<24} {:<5} {:<8} STATUT", "ID", "IMAGE", "CPU", "MÉMOIRE");
             for w in workloads {
-                println!("{:<14} {:<24} {}", w.id, w.image, w.status);
+                println!(
+                    "{:<10} {:<24} {:<5} {:<8} {}",
+                    w.id,
+                    w.spec.image,
+                    w.spec.cpu,
+                    format!("{}MB", w.spec.memory >> 20),
+                    w.state
+                );
             }
         }
         Response::Error(e) => anyhow::bail!("{e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
     }
     Ok(())
 }
 
-pub fn stop(workload_id: &str) -> anyhow::Result<()> {
-    println!("arrêt demandé : {workload_id}");
-    not_yet("stop")
+pub async fn stop(workload_id: &str, data_dir: &Path) -> anyhow::Result<()> {
+    let request = Request::Stop {
+        id: workload_id.to_string(),
+    };
+    match client::send(data_dir, &request).await? {
+        Response::Stopped => println!("{workload_id} : stopped"),
+        Response::Error(e) => anyhow::bail!("{e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
+    }
+    Ok(())
 }
 
 pub fn chunk(path: &Path) -> anyhow::Result<()> {

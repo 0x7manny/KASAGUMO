@@ -3,6 +3,8 @@ mod client;
 mod commands;
 mod daemon;
 mod protocol;
+mod store;
+mod workload;
 
 use std::process::ExitCode;
 
@@ -17,9 +19,9 @@ async fn main() -> ExitCode {
     let result = match cli.command {
         Command::Node { action } => commands::node(action, &cli.data_dir).await,
         Command::Nodes => commands::nodes(),
-        Command::Run(args) => commands::run(args),
+        Command::Run(args) => commands::run(args, &cli.data_dir).await,
         Command::Ps { all } => commands::ps(all, &cli.data_dir).await,
-        Command::Stop { workload_id } => commands::stop(&workload_id),
+        Command::Stop { workload_id } => commands::stop(&workload_id, &cli.data_dir).await,
         Command::Chunk { path } => commands::chunk(&path),
     };
 
