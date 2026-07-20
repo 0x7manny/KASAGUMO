@@ -14,7 +14,7 @@ fn not_yet(command: &str) -> anyhow::Result<()> {
 
 pub async fn node(action: NodeAction, data_dir: &Path) -> anyhow::Result<()> {
     match action {
-        NodeAction::Start { port: _ } => daemon::serve(data_dir).await,
+        NodeAction::Start { port } => daemon::serve(data_dir, port).await,
     }
 }
 

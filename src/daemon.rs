@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::protocol::{Request, Response};
+use crate::protocol::{NodeInfo, Request, Response};
 use crate::store::Store;
 use crate::workload::WorkloadState;
 
@@ -14,7 +14,20 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join("kgo.sock")
 }
 
-pub async fn serve(data_dir: &Path) -> anyhow::Result<()> {
+struct Node {
+    store: Store,
+    info: NodeInfo,
+}
+
+/// Origine d'une connexion : le socket Unix est de confiance, le port TCP
+/// (ouvert aux autres machines) ne sert que les requêtes en lecture seule.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Local,
+    Remote,
+}
+
+pub async fn serve(data_dir: &Path, port: u16) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("impossible de créer {}", data_dir.display()))?;
     let data_dir = std::fs::canonicalize(data_dir)?;
@@ -27,23 +40,36 @@ pub async fn serve(data_dir: &Path) -> anyhow::Result<()> {
         std::fs::remove_file(&path).context("impossible de supprimer l'ancien socket")?;
     }
 
-    let store = Arc::new(Store::open(&data_dir.join("state.redb"))?);
+    let store = Store::open(&data_dir.join("state.redb"))?;
 
-    let listener = UnixListener::bind(&path)
+    let tcp = TcpListener::bind(("0.0.0.0", port))
+        .await
+        .with_context(|| format!("impossible d'écouter sur le port {port}"))?;
+    let port = tcp.local_addr()?.port();
+    let unix = UnixListener::bind(&path)
         .with_context(|| format!("impossible d'ouvrir le socket {}", path.display()))?;
-    println!("nœud démarré, socket : {}", path.display());
+
+    let info = NodeInfo {
+        id: store.node_id()?,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+        port,
+    };
+    let node = Arc::new(Node { store, info });
+    println!("nœud {} démarré", node.info.id);
+    println!("socket : {}", path.display());
+    println!("tcp : 0.0.0.0:{port}");
 
     let mut sigterm = signal(SignalKind::terminate())?;
     loop {
         tokio::select! {
-            accepted = listener.accept() => {
+            accepted = unix.accept() => {
                 let (stream, _) = accepted?;
-                let store = Arc::clone(&store);
-                tokio::spawn(async move {
-                    if let Err(e) = handle(stream, &store).await {
-                        eprintln!("connexion en erreur : {e:#}");
-                    }
-                });
+                spawn_handler(stream, Arc::clone(&node), Origin::Local);
+            }
+            accepted = tcp.accept() => {
+                let (stream, _) = accepted?;
+                spawn_handler(stream, Arc::clone(&node), Origin::Remote);
             }
             _ = tokio::signal::ctrl_c() => break,
             _ = sigterm.recv() => break,
@@ -55,13 +81,28 @@ pub async fn serve(data_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle(stream: UnixStream, store: &Store) -> anyhow::Result<()> {
-    let (reader, mut writer) = stream.into_split();
+fn spawn_handler<S>(stream: S, node: Arc<Node>, origin: Origin)
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(e) = handle(stream, &node, origin).await {
+            eprintln!("connexion en erreur : {e:#}");
+        }
+    });
+}
+
+async fn handle<S>(stream: S, node: &Node, origin: Origin) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite,
+{
+    let (reader, writer) = tokio::io::split(stream);
+    let mut writer = Box::pin(writer);
     let mut lines = BufReader::new(reader).lines();
 
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => dispatch(request, store),
+            Ok(request) => dispatch(request, node, origin),
             Err(e) => Response::Error(format!("requête invalide : {e}")),
         };
         let mut out = serde_json::to_vec(&response)?;
@@ -71,8 +112,13 @@ async fn handle(stream: UnixStream, store: &Store) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn dispatch(request: Request, store: &Store) -> Response {
+fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
+    if origin == Origin::Remote && !matches!(request, Request::Info) {
+        return Response::Error("requête refusée depuis le réseau".to_string());
+    }
+    let store = &node.store;
     let result = match request {
+        Request::Info => Ok(Response::Info(node.info.clone())),
         Request::Run(spec) => store.create(spec).map(Response::Started),
         Request::Ps { all } => store.list().map(|mut workloads| {
             if !all {

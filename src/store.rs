@@ -6,6 +6,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use crate::workload::{Workload, WorkloadSpec, WorkloadState};
 
 const WORKLOADS: TableDefinition<&str, &[u8]> = TableDefinition::new("workloads");
+const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 
 pub struct Store {
     db: Database,
@@ -17,8 +18,28 @@ impl Store {
             .with_context(|| format!("impossible d'ouvrir la base {}", path.display()))?;
         let tx = db.begin_write()?;
         tx.open_table(WORKLOADS)?;
+        tx.open_table(META)?;
         tx.commit()?;
         Ok(Self { db })
+    }
+
+    /// Identifiant stable du nœud, généré au premier démarrage.
+    pub fn node_id(&self) -> anyhow::Result<String> {
+        let tx = self.db.begin_write()?;
+        let id = {
+            let mut meta = tx.open_table(META)?;
+            let existing = meta.get("node_id")?.map(|v| v.value().to_string());
+            match existing {
+                Some(id) => id,
+                None => {
+                    let id = format!("{:016x}", rand::random::<u64>());
+                    meta.insert("node_id", id.as_str())?;
+                    id
+                }
+            }
+        };
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn create(&self, spec: WorkloadSpec) -> anyhow::Result<Workload> {
