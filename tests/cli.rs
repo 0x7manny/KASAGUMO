@@ -26,13 +26,6 @@ fn run_sans_daemon_explique_quoi_faire() {
 }
 
 #[test]
-fn commande_non_implementee_echoue() {
-    let out = kgo(&["nodes"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("pas encore implémenté"));
-}
-
-#[test]
 fn memoire_invalide_est_refusee() {
     let out = kgo(&["run", "--memory", "4TB", "nginx"]);
     assert!(!out.status.success());
@@ -67,24 +60,28 @@ fn ps_sans_daemon_explique_quoi_faire() {
 struct Daemon {
     dir: std::path::PathBuf,
     child: std::process::Child,
+    port: u16,
+    _stdout: std::io::BufReader<std::process::ChildStdout>,
 }
 
 impl Daemon {
     fn start(dir: &std::path::Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_kgo"))
-            .args(["node", "start", "--data-dir", dir.to_str().unwrap()])
-            .stdout(std::process::Stdio::null())
+        use std::io::BufRead;
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kgo"))
+            .args(["node", "start", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let socket = dir.join("kgo.sock");
-        let daemon = Self { dir: dir.to_path_buf(), child };
-        for _ in 0..100 {
-            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-                return daemon;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut port = None;
+        let mut line = String::new();
+        while port.is_none() && stdout.read_line(&mut line).unwrap() > 0 {
+            port = line.trim().strip_prefix("tcp : 0.0.0.0:").map(|p| p.parse().unwrap());
+            line.clear();
         }
-        panic!("le daemon n'a pas démarré");
+        let port = port.expect("le daemon n'a pas annoncé son port");
+        Self { dir: dir.to_path_buf(), child, port, _stdout: stdout }
     }
 
     fn kgo(&self, args: &[&str]) -> Output {
@@ -146,6 +143,32 @@ fn cycle_de_vie_et_persistance() {
     let out = daemon.kgo(&["stop", "inconnu"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("introuvable"));
+
+    daemon.stop();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Envoie une requête JSON brute sur le port TCP du nœud.
+fn tcp_request(port: u16, request: &str) -> String {
+    use std::io::{BufRead, Write};
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    writeln!(stream, "{request}").unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(stream).read_line(&mut line).unwrap();
+    line
+}
+
+#[test]
+fn le_port_tcp_repond_aux_info_seulement() {
+    let dir = std::env::temp_dir().join(format!("kgo-tcp-{}", std::process::id()));
+    let daemon = Daemon::start(&dir);
+
+    let info = tcp_request(daemon.port, r#""Info""#);
+    assert!(info.contains("\"cpus\"") && info.contains(&format!("\"port\":{}", daemon.port)), "{info}");
+
+    let refused = tcp_request(daemon.port, r#"{"Ps":{"all":true}}"#);
+    assert!(refused.contains("refusée"), "{refused}");
 
     daemon.stop();
     std::fs::remove_dir_all(&dir).ok();
