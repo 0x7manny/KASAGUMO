@@ -8,18 +8,44 @@ use crate::protocol::{Request, Response};
 use crate::workload::WorkloadSpec;
 use crate::{client, daemon};
 
-fn not_yet(command: &str) -> anyhow::Result<()> {
-    anyhow::bail!("`kgo {command}` n'est pas encore implémenté (prévu en M1)")
-}
-
 pub async fn node(action: NodeAction, data_dir: &Path) -> anyhow::Result<()> {
     match action {
         NodeAction::Start { port } => daemon::serve(data_dir, port).await,
+        NodeAction::Join { addr } => join(&addr, data_dir).await,
     }
 }
 
-pub fn nodes() -> anyhow::Result<()> {
-    not_yet("nodes")
+async fn join(addr: &str, data_dir: &Path) -> anyhow::Result<()> {
+    // le pair doit répondre avant d'être retenu
+    match client::send_to_peer(addr, &Request::Info).await? {
+        Response::Info(info) => {
+            match client::send(data_dir, &Request::AddPeer { addr: addr.to_string() }).await? {
+                Response::PeerAdded => println!("pair ajouté : {addr} (nœud {})", info.id),
+                Response::Error(e) => anyhow::bail!("{e}"),
+                other => anyhow::bail!("réponse inattendue : {other:?}"),
+            }
+        }
+        Response::Error(e) => anyhow::bail!("{addr} : {e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
+    }
+    Ok(())
+}
+
+pub async fn nodes(data_dir: &Path) -> anyhow::Result<()> {
+    match client::send(data_dir, &Request::Nodes).await? {
+        Response::Nodes(nodes) => {
+            println!("{:<24} {:<18} {:<5} {:<8} STATUT", "ADRESSE", "ID", "CPU", "VERSION");
+            for n in nodes {
+                match n.info {
+                    Ok(i) => println!("{:<24} {:<18} {:<5} {:<8} up", n.addr, i.id, i.cpus, i.version),
+                    Err(e) => println!("{:<24} {:<18} {:<5} {:<8} injoignable ({e})", n.addr, "-", "-", "-"),
+                }
+            }
+        }
+        Response::Error(e) => anyhow::bail!("{e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
+    }
+    Ok(())
 }
 
 pub async fn run(args: RunArgs, data_dir: &Path) -> anyhow::Result<()> {

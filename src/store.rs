@@ -6,6 +6,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use crate::workload::{Workload, WorkloadSpec, WorkloadState};
 
 const WORKLOADS: TableDefinition<&str, &[u8]> = TableDefinition::new("workloads");
+const PEERS: TableDefinition<&str, ()> = TableDefinition::new("peers");
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 
 pub struct Store {
@@ -19,6 +20,7 @@ impl Store {
         let tx = db.begin_write()?;
         tx.open_table(WORKLOADS)?;
         tx.open_table(META)?;
+        tx.open_table(PEERS)?;
         tx.commit()?;
         Ok(Self { db })
     }
@@ -88,5 +90,23 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn add_peer(&self, addr: &str) -> anyhow::Result<()> {
+        let tx = self.db.begin_write()?;
+        tx.open_table(PEERS)?.insert(addr, ())?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn peers(&self) -> anyhow::Result<Vec<String>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(PEERS)?;
+        let mut peers = Vec::new();
+        for entry in table.iter()? {
+            let (addr, _) = entry?;
+            peers.push(addr.value().to_string());
+        }
+        Ok(peers)
     }
 }

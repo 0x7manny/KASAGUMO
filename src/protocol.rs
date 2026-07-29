@@ -10,12 +10,21 @@ pub struct NodeInfo {
     pub port: u16,
 }
 
+/// Un nœud tel que vu par `kgo nodes` : `info` est vide si le pair est injoignable.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NodeStatus {
+    pub addr: String,
+    pub info: Result<NodeInfo, String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     Run(WorkloadSpec),
     Ps { all: bool },
     Stop { id: String },
     Info,
+    AddPeer { addr: String },
+    Nodes,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -24,5 +33,7 @@ pub enum Response {
     Workloads(Vec<Workload>),
     Stopped,
     Info(NodeInfo),
+    PeerAdded,
+    Nodes(Vec<NodeStatus>),
     Error(String),
 }

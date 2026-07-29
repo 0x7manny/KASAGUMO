@@ -1,11 +1,14 @@
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Context;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::{TcpStream, UnixStream};
 
 use crate::daemon::socket_path;
 use crate::protocol::{Request, Response};
+
+const PEER_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub async fn send(data_dir: &Path, request: &Request) -> anyhow::Result<Response> {
     let path = socket_path(data_dir);
@@ -15,7 +18,28 @@ pub async fn send(data_dir: &Path, request: &Request) -> anyhow::Result<Response
             path.display()
         )
     })?;
-    let (reader, mut writer) = stream.into_split();
+    exchange(stream, request).await
+}
+
+/// Envoie une requête à un nœud distant, avec un délai maximum.
+pub async fn send_to_peer(addr: &str, request: &Request) -> anyhow::Result<Response> {
+    let attempt = async {
+        let stream = TcpStream::connect(addr)
+            .await
+            .with_context(|| format!("connexion à {addr} impossible"))?;
+        exchange(stream, request).await
+    };
+    tokio::time::timeout(PEER_TIMEOUT, attempt)
+        .await
+        .map_err(|_| anyhow::anyhow!("{addr} ne répond pas"))?
+}
+
+async fn exchange<S>(stream: S, request: &Request) -> anyhow::Result<Response>
+where
+    S: AsyncRead + AsyncWrite,
+{
+    let (reader, writer) = tokio::io::split(stream);
+    let mut writer = Box::pin(writer);
 
     let mut out = serde_json::to_vec(request)?;
     out.push(b'\n');

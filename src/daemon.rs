@@ -5,8 +5,10 @@ use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinSet;
 
-use crate::protocol::{NodeInfo, Request, Response};
+use crate::client;
+use crate::protocol::{NodeInfo, NodeStatus, Request, Response};
 use crate::store::Store;
 use crate::workload::WorkloadState;
 
@@ -102,7 +104,7 @@ where
 
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => dispatch(request, node, origin),
+            Ok(request) => dispatch(request, node, origin).await,
             Err(e) => Response::Error(format!("requête invalide : {e}")),
         };
         let mut out = serde_json::to_vec(&response)?;
@@ -112,12 +114,14 @@ where
     Ok(())
 }
 
-fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
+async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
     if origin == Origin::Remote && !matches!(request, Request::Info) {
         return Response::Error("requête refusée depuis le réseau".to_string());
     }
     let store = &node.store;
     let result = match request {
+        Request::AddPeer { addr } => store.add_peer(&addr).map(|()| Response::PeerAdded),
+        Request::Nodes => nodes(node).await.map(Response::Nodes),
         Request::Info => Ok(Response::Info(node.info.clone())),
         Request::Run(spec) => store.create(spec).map(Response::Started),
         Request::Ps { all } => store.list().map(|mut workloads| {
@@ -131,4 +135,33 @@ fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
             .map(|()| Response::Stopped),
     };
     result.unwrap_or_else(|e| Response::Error(format!("{e:#}")))
+}
+
+/// Le nœud local suivi de ses pairs, interrogés en parallèle.
+async fn nodes(node: &Node) -> anyhow::Result<Vec<NodeStatus>> {
+    let mut queries = JoinSet::new();
+    for addr in node.store.peers()? {
+        queries.spawn(async move {
+            let info = match client::send_to_peer(&addr, &Request::Info).await {
+                Ok(Response::Info(info)) => Ok(info),
+                Ok(Response::Error(e)) => Err(e),
+                Ok(other) => Err(format!("réponse inattendue : {other:?}")),
+                Err(e) => Err(format!("{e:#}")),
+            };
+            NodeStatus { addr, info }
+        });
+    }
+
+    let mut peers = Vec::new();
+    while let Some(status) = queries.join_next().await {
+        peers.push(status?);
+    }
+    peers.sort_by(|a, b| a.addr.cmp(&b.addr));
+
+    let mut statuses = vec![NodeStatus {
+        addr: format!("localhost:{}", node.info.port),
+        info: Ok(node.info.clone()),
+    }];
+    statuses.extend(peers);
+    Ok(statuses)
 }

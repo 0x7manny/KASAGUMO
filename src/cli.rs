@@ -50,6 +50,11 @@ pub enum NodeAction {
         #[arg(long, default_value_t = 7070)]
         port: u16,
     },
+    /// Ajouter un autre nœud à la liste des pairs
+    Join {
+        /// Adresse du pair (ex : 192.168.1.10:7070)
+        addr: String,
+    },
 }
 
 #[derive(Debug, Args)]
