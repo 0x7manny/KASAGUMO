@@ -173,3 +173,32 @@ fn le_port_tcp_repond_aux_info_seulement() {
     daemon.stop();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn join_et_nodes() {
+    let base = std::env::temp_dir().join(format!("kgo-nodes-{}", std::process::id()));
+    let (dir_a, dir_b) = (base.join("a"), base.join("b"));
+    let a = Daemon::start(&dir_a);
+    let b = Daemon::start(&dir_b);
+
+    let addr_b = format!("127.0.0.1:{}", b.port);
+    let out = a.kgo(&["node", "join", &addr_b]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let listing = text(&a.kgo(&["nodes"]).stdout);
+    assert!(listing.contains(&addr_b) && listing.contains("up"), "{listing}");
+    assert_eq!(listing.matches(" up").count(), 2, "{listing}");
+
+    // un pair injoignable est signalé mais n'empêche pas la liste
+    b.stop();
+    let listing = text(&a.kgo(&["nodes"]).stdout);
+    assert!(listing.contains("injoignable"), "{listing}");
+    assert!(listing.contains("localhost"), "{listing}");
+
+    // on ne retient pas une adresse qui ne répond pas
+    let out = a.kgo(&["node", "join", &addr_b]);
+    assert_eq!(out.status.code(), Some(1));
+
+    a.stop();
+    std::fs::remove_dir_all(&base).ok();
+}
