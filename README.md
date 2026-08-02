@@ -23,8 +23,11 @@ It describes a cloud that forms like a hat over **Mount Fuji**.
 ## Commands
 
 ```bash
-# Start a node
-kgo node start
+# Start a node (Unix socket for the CLI, TCP port for peers)
+kgo node start --port 7070
+
+# Add a peer to this node
+kgo node join 192.168.1.10:7070
 
 # List available nodes
 kgo nodes
