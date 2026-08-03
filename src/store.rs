@@ -77,6 +77,27 @@ impl Store {
         Ok(workloads)
     }
 
+    /// Passe le workload à `to` seulement s'il est encore à l'état `from`.
+    /// Renvoie false si l'état a changé entre-temps (ex : arrêt pendant le pull).
+    pub fn advance(&self, id: &str, from: WorkloadState, to: WorkloadState) -> anyhow::Result<bool> {
+        let tx = self.db.begin_write()?;
+        let advanced = {
+            let mut table = tx.open_table(WORKLOADS)?;
+            let current = match table.get(id)? {
+                Some(value) => serde_json::from_slice::<Workload>(value.value())?,
+                None => bail!("workload introuvable : {id}"),
+            };
+            let advanced = current.state == from;
+            if advanced {
+                let updated = Workload { state: to, ..current };
+                table.insert(id, serde_json::to_vec(&updated)?.as_slice())?;
+            }
+            advanced
+        };
+        tx.commit()?;
+        Ok(advanced)
+    }
+
     pub fn set_state(&self, id: &str, state: WorkloadState) -> anyhow::Result<()> {
         let tx = self.db.begin_write()?;
         {

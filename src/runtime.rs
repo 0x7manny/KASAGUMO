@@ -23,7 +23,7 @@ pub fn run_args(workload: &Workload) -> Vec<String> {
     ]
 }
 
-/// Exécute les workloads en pilotant la CLI `docker`.
+/// Exécute les workloads en pilotant la CLI `docker` (remplaçable via `KGO_DOCKER`).
 pub struct DockerRuntime;
 
 impl DockerRuntime {
@@ -47,7 +47,8 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let args: Vec<S> = args.into_iter().collect();
-    let output = Command::new("docker")
+    let program = std::env::var("KGO_DOCKER").unwrap_or_else(|_| "docker".to_string());
+    let output = Command::new(program)
         .args(&args)
         .output()
         .await

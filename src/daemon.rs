@@ -9,15 +9,17 @@ use tokio::task::JoinSet;
 
 use crate::client;
 use crate::protocol::{NodeInfo, NodeStatus, Request, Response};
+use crate::runtime::DockerRuntime;
 use crate::store::Store;
-use crate::workload::WorkloadState;
+use crate::workload::{Workload, WorkloadState};
 
 pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join("kgo.sock")
 }
 
 struct Node {
-    store: Store,
+    store: Arc<Store>,
+    runtime: DockerRuntime,
     info: NodeInfo,
 }
 
@@ -57,7 +59,7 @@ pub async fn serve(data_dir: &Path, port: u16) -> anyhow::Result<()> {
         cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
         port,
     };
-    let node = Arc::new(Node { store, info });
+    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info });
     println!("nœud {} démarré", node.info.id);
     println!("socket : {}", path.display());
     println!("tcp : 0.0.0.0:{port}");
@@ -123,16 +125,17 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
         Request::AddPeer { addr } => store.add_peer(&addr).map(|()| Response::PeerAdded),
         Request::Nodes => nodes(node).await.map(Response::Nodes),
         Request::Info => Ok(Response::Info(node.info.clone())),
-        Request::Run(spec) => store.create(spec).map(Response::Started),
+        Request::Run(spec) => store.create(spec).map(|workload| {
+            tokio::spawn(launch(Arc::clone(store), workload.clone()));
+            Response::Started(workload)
+        }),
         Request::Ps { all } => store.list().map(|mut workloads| {
             if !all {
                 workloads.retain(|w| w.state.is_active());
             }
             Response::Workloads(workloads)
         }),
-        Request::Stop { id } => store
-            .set_state(&id, WorkloadState::Stopped)
-            .map(|()| Response::Stopped),
+        Request::Stop { id } => stop(node, &id).await.map(|()| Response::Stopped),
     };
     result.unwrap_or_else(|e| Response::Error(format!("{e:#}")))
 }
@@ -164,4 +167,35 @@ async fn nodes(node: &Node) -> anyhow::Result<Vec<NodeStatus>> {
     }];
     statuses.extend(peers);
     Ok(statuses)
+}
+
+/// Fait avancer un workload : Pending → Pulling → Running, ou Failed si Docker échoue.
+async fn launch(store: Arc<Store>, workload: Workload) {
+    use WorkloadState::*;
+    let outcome = async {
+        if !store.advance(&workload.id, Pending, Pulling)? {
+            return Ok(());
+        }
+        DockerRuntime.pull(&workload.spec.image).await?;
+        DockerRuntime.start(&workload).await?;
+        if !store.advance(&workload.id, Pulling, Running)? {
+            // arrêté pendant le démarrage : le conteneur vient d'être créé, on le retire
+            DockerRuntime.stop(&workload.id).await?;
+        }
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(e) = outcome {
+        eprintln!("workload {} en échec : {e:#}", workload.id);
+        store.advance(&workload.id, Pulling, Failed).ok();
+    }
+}
+
+async fn stop(node: &Node, id: &str) -> anyhow::Result<()> {
+    // set_state échoue si le workload est inconnu : on ne touche pas à Docker dans ce cas
+    node.store.set_state(id, WorkloadState::Stopped)?;
+    if let Err(e) = node.runtime.stop(id).await {
+        eprintln!("arrêt du conteneur de {id} : {e:#}");
+    }
+    Ok(())
 }
