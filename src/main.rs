@@ -3,6 +3,8 @@ mod client;
 mod commands;
 mod daemon;
 mod protocol;
+#[allow(dead_code)] // branché dans le daemon au prochain commit
+mod runtime;
 mod store;
 mod workload;
 
