@@ -70,6 +70,7 @@ impl Daemon {
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_kgo"))
             .args(["node", "start", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+            .env("KGO_DOCKER", "true") // docker factice : toutes les commandes réussissent
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
@@ -104,6 +105,18 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Attend que `kgo ps` affiche `expected` (le démarrage est asynchrone).
+fn wait_for_ps(daemon: &Daemon, expected: &str) -> String {
+    for _ in 0..100 {
+        let ps = text(&daemon.kgo(&["ps"]).stdout);
+        if ps.contains(expected) {
+            return ps;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("`kgo ps` n'a jamais affiché « {expected} »");
+}
+
 #[test]
 fn ps_parle_au_daemon() {
     let dir = std::env::temp_dir().join(format!("kgo-daemon-{}", std::process::id()));
@@ -127,7 +140,7 @@ fn cycle_de_vie_et_persistance() {
     assert!(stdout.contains("pending"));
     let id = stdout.split_whitespace().next().unwrap().to_string();
 
-    let ps = text(&daemon.kgo(&["ps"]).stdout);
+    let ps = wait_for_ps(&daemon, "running");
     assert!(ps.contains(&id) && ps.contains("nginx:latest") && ps.contains("4096MB"));
 
     // le daemon est tué brutalement puis relancé : l'état doit survivre
