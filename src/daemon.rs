@@ -60,6 +60,7 @@ pub async fn serve(data_dir: &Path, port: u16) -> anyhow::Result<()> {
         port,
     };
     let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info });
+    reconcile(&node).await?;
     println!("nœud {} démarré", node.info.id);
     println!("socket : {}", path.display());
     println!("tcp : 0.0.0.0:{port}");
@@ -196,6 +197,24 @@ async fn stop(node: &Node, id: &str) -> anyhow::Result<()> {
     node.store.set_state(id, WorkloadState::Stopped)?;
     if let Err(e) = node.runtime.stop(id).await {
         eprintln!("arrêt du conteneur de {id} : {e:#}");
+    }
+    Ok(())
+}
+
+/// Remet la base en accord avec la réalité après un redémarrage du daemon :
+/// un démarrage interrompu ou un conteneur disparu ne sont plus « actifs ».
+async fn reconcile(node: &Node) -> anyhow::Result<()> {
+    use WorkloadState::*;
+    for w in node.store.list()? {
+        let alive = match w.state {
+            Pending | Pulling => false,
+            Running => node.runtime.is_running(&w.id).await,
+            Stopped | Failed => continue,
+        };
+        if !alive {
+            eprintln!("workload {} ({}) : {} → failed", w.id, w.spec.image, w.state);
+            node.store.advance(&w.id, w.state, Failed)?;
+        }
     }
     Ok(())
 }

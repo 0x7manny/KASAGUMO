@@ -35,6 +35,14 @@ impl DockerRuntime {
         docker(run_args(workload)).await.map(drop)
     }
 
+    /// Vrai si le conteneur du workload existe et tourne.
+    pub async fn is_running(&self, workload_id: &str) -> bool {
+        let name = container_name(workload_id);
+        docker(["inspect", "--format", "{{.State.Running}}", name.as_str()])
+            .await
+            .is_ok_and(|out| out == "true")
+    }
+
     pub async fn stop(&self, workload_id: &str) -> anyhow::Result<()> {
         let name = container_name(workload_id);
         docker(["rm", "--force", name.as_str()]).await.map(drop)
