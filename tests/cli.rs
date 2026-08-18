@@ -66,11 +66,23 @@ struct Daemon {
 
 impl Daemon {
     fn start(dir: &std::path::Path) -> Self {
+        Self::start_with_docker(dir, true)
+    }
+
+    /// `containers_alive` : ce que répond le docker factice à `docker inspect`.
+    fn start_with_docker(dir: &std::path::Path, containers_alive: bool) -> Self {
         use std::io::BufRead;
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(dir).unwrap();
+        let docker = dir.join("fake-docker.sh");
+        let script = format!("#!/bin/sh\n[ \"$1\" = inspect ] && echo {containers_alive}\nexit 0\n");
+        std::fs::write(&docker, script).unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_kgo"))
             .args(["node", "start", "--port", "0", "--data-dir", dir.to_str().unwrap()])
-            .env("KGO_DOCKER", "true") // docker factice : toutes les commandes réussissent
+            .env("KGO_DOCKER", &docker) // docker factice : toutes les commandes réussissent
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
@@ -214,4 +226,23 @@ fn join_et_nodes() {
 
     a.stop();
     std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn reconciliation_au_redemarrage() {
+    let dir = std::env::temp_dir().join(format!("kgo-reconcile-{}", std::process::id()));
+    let daemon = Daemon::start(&dir);
+    let out = daemon.kgo(&["run", "nginx"]);
+    let id = text(&out.stdout).split_whitespace().next().unwrap().to_string();
+    wait_for_ps(&daemon, "running");
+
+    // le daemon redémarre alors que le conteneur a disparu : le workload devient failed
+    daemon.stop();
+    let daemon = Daemon::start_with_docker(&dir, false);
+    assert!(text(&daemon.kgo(&["ps"]).stdout).contains("aucun workload"));
+    let all = text(&daemon.kgo(&["ps", "--all"]).stdout);
+    assert!(all.contains(&id) && all.contains("failed"), "{all}");
+
+    daemon.stop();
+    std::fs::remove_dir_all(&dir).ok();
 }
