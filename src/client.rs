@@ -18,30 +18,39 @@ pub async fn send(data_dir: &Path, request: &Request) -> anyhow::Result<Response
             path.display()
         )
     })?;
-    exchange(stream, request).await
+    exchange(stream, None, request).await
 }
 
-/// Envoie une requête à un nœud distant, avec un délai maximum.
-pub async fn send_to_peer(addr: &str, request: &Request) -> anyhow::Result<Response> {
+/// Envoie la requête au nœud local, ou à `on` par son intermédiaire.
+pub async fn send_on(data_dir: &Path, on: Option<&str>, request: Request) -> anyhow::Result<Response> {
+    match on {
+        Some(addr) => send(data_dir, &Request::Forward { addr: addr.to_string(), request: Box::new(request) }).await,
+        None => send(data_dir, &request).await,
+    }
+}
+
+/// Envoie une requête à un nœud distant (`token` : secret du cluster, vide si inconnu), avec un délai maximum.
+pub async fn send_to_peer(addr: &str, token: &str, request: &Request) -> anyhow::Result<Response> {
     let attempt = async {
         let stream = TcpStream::connect(addr)
             .await
             .with_context(|| format!("connexion à {addr} impossible"))?;
-        exchange(stream, request).await
+        exchange(stream, Some(token), request).await
     };
     tokio::time::timeout(PEER_TIMEOUT, attempt)
         .await
         .map_err(|_| anyhow::anyhow!("{addr} ne répond pas"))?
 }
 
-async fn exchange<S>(stream: S, request: &Request) -> anyhow::Result<Response>
+async fn exchange<S>(stream: S, token: Option<&str>, request: &Request) -> anyhow::Result<Response>
 where
     S: AsyncRead + AsyncWrite,
 {
     let (reader, writer) = tokio::io::split(stream);
     let mut writer = Box::pin(writer);
 
-    let mut out = serde_json::to_vec(request)?;
+    let mut out = token.map(|t| format!("{t}\n").into_bytes()).unwrap_or_default();
+    serde_json::to_writer(&mut out, request)?;
     out.push(b'\n');
     writer.write_all(&out).await?;
 

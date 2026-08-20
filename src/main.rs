@@ -20,9 +20,9 @@ async fn main() -> ExitCode {
     let result = match cli.command {
         Command::Node { action } => commands::node(action, &cli.data_dir).await,
         Command::Nodes => commands::nodes(&cli.data_dir).await,
-        Command::Run(args) => commands::run(args, &cli.data_dir).await,
-        Command::Ps { all } => commands::ps(all, &cli.data_dir).await,
-        Command::Stop { workload_id } => commands::stop(&workload_id, &cli.data_dir).await,
+        Command::Run(args) => commands::run(args, cli.on.as_deref(), &cli.data_dir).await,
+        Command::Ps { all } => commands::ps(all, cli.on.as_deref(), &cli.data_dir).await,
+        Command::Stop { workload_id } => commands::stop(&workload_id, cli.on.as_deref(), &cli.data_dir).await,
         Command::Chunk { path } => commands::chunk(&path),
     };
 

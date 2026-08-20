@@ -9,6 +9,10 @@ pub struct Cli {
     #[arg(long, global = true, default_value = ".kasagumo")]
     pub data_dir: PathBuf,
 
+    /// Adresse d'un pair qui exécute `run`, `ps` ou `stop` à la place du nœud local
+    #[arg(long, global = true)]
+    pub on: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -49,6 +53,10 @@ pub enum NodeAction {
         /// Port d'écoute
         #[arg(long, default_value_t = 7070)]
         port: u16,
+
+        /// Secret partagé par les nœuds du cluster (sans lui, les pairs ne peuvent rien lancer)
+        #[arg(long, env = "KGO_TOKEN", hide_env_values = true)]
+        token: Option<String>,
     },
     /// Ajouter un autre nœud à la liste des pairs
     Join {

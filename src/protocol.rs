@@ -25,6 +25,8 @@ pub enum Request {
     Info,
     AddPeer { addr: String },
     Nodes,
+    /// Fait exécuter la requête par un pair (le nœud local s'authentifie pour le CLI).
+    Forward { addr: String, request: Box<Request> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
