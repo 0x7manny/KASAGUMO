@@ -57,6 +57,8 @@ fn ps_sans_daemon_explique_quoi_faire() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("kgo node start"));
 }
 
+const TOKEN: &str = "secret";
+
 struct Daemon {
     dir: std::path::PathBuf,
     child: std::process::Child,
@@ -82,6 +84,7 @@ impl Daemon {
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_kgo"))
             .args(["node", "start", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+            .env("KGO_TOKEN", TOKEN)
             .env("KGO_DOCKER", &docker) // docker factice : toutes les commandes réussissent
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -173,27 +176,31 @@ fn cycle_de_vie_et_persistance() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Envoie une requête JSON brute sur le port TCP du nœud.
-fn tcp_request(port: u16, request: &str) -> String {
+/// Envoie une requête JSON brute sur le port TCP du nœud, précédée du token.
+fn tcp_request(port: u16, token: &str, request: &str) -> String {
     use std::io::{BufRead, Write};
 
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    writeln!(stream, "{request}").unwrap();
+    writeln!(stream, "{token}\n{request}").unwrap();
     let mut line = String::new();
     std::io::BufReader::new(stream).read_line(&mut line).unwrap();
     line
 }
 
 #[test]
-fn le_port_tcp_repond_aux_info_seulement() {
+fn le_port_tcp_exige_le_token_hors_info() {
     let dir = std::env::temp_dir().join(format!("kgo-tcp-{}", std::process::id()));
     let daemon = Daemon::start(&dir);
 
-    let info = tcp_request(daemon.port, r#""Info""#);
+    let info = tcp_request(daemon.port, "", r#""Info""#);
     assert!(info.contains("\"cpus\"") && info.contains(&format!("\"port\":{}", daemon.port)), "{info}");
 
-    let refused = tcp_request(daemon.port, r#"{"Ps":{"all":true}}"#);
-    assert!(refused.contains("refusée"), "{refused}");
+    let ps = r#"{"Ps":{"all":true}}"#;
+    for token in ["", "mauvais"] {
+        let refused = tcp_request(daemon.port, token, ps);
+        assert!(refused.contains("refusée"), "{refused}");
+    }
+    assert!(tcp_request(daemon.port, TOKEN, ps).contains("Workloads"));
 
     daemon.stop();
     std::fs::remove_dir_all(&dir).ok();
@@ -245,4 +252,28 @@ fn reconciliation_au_redemarrage() {
 
     daemon.stop();
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn run_ps_stop_sur_un_pair() {
+    let base = std::env::temp_dir().join(format!("kgo-forward-{}", std::process::id()));
+    let (a, b) = (Daemon::start(&base.join("a")), Daemon::start(&base.join("b")));
+    let on = format!("127.0.0.1:{}", b.port);
+
+    let out = a.kgo(&["--on", &on, "run", "nginx"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let id = text(&out.stdout).split_whitespace().next().unwrap().to_string();
+
+    // le workload vit sur b, pas sur a
+    assert!(text(&a.kgo(&["ps"]).stdout).contains("aucun workload"));
+    assert!(text(&b.kgo(&["ps"]).stdout).contains(&id));
+    assert!(text(&a.kgo(&["--on", &on, "ps"]).stdout).contains(&id));
+
+    let out = a.kgo(&["--on", &on, "stop", &id]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&b.kgo(&["ps"]).stdout).contains("aucun workload"));
+
+    a.stop();
+    b.stop();
+    std::fs::remove_dir_all(&base).ok();
 }
