@@ -24,7 +24,7 @@ It describes a cloud that forms like a hat over **Mount Fuji**.
 
 ```bash
 # Start a node (Unix socket for the CLI, TCP port for peers)
-kgo node start --port 7070
+kgo node start --port 7070 --token <secret>   # or KGO_TOKEN
 
 # Add a peer to this node
 kgo node join 192.168.1.10:7070
@@ -35,7 +35,10 @@ kgo nodes
 # Run a workload
 kgo run --cpu 2 --memory 4GB nginx:latest
 
-# List running workloads
+# Run on a peer (same token on both nodes)
+kgo --on 192.168.1.10:7070 run nginx:latest
+
+# List running workloads (also --on)
 kgo ps
 
 # Stop a workload
