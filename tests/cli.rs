@@ -277,3 +277,28 @@ fn run_ps_stop_sur_un_pair() {
     b.stop();
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn run_choisit_le_noeud_le_plus_libre() {
+    let base = std::env::temp_dir().join(format!("kgo-schedule-{}", std::process::id()));
+    let (a, b) = (Daemon::start(&base.join("a")), Daemon::start(&base.join("b")));
+    let addr_b = format!("127.0.0.1:{}", b.port);
+    assert!(a.kgo(&["node", "join", &addr_b]).status.success());
+
+    // a est plein : le workload suivant part sur b
+    let cpus = std::thread::available_parallelism().unwrap().get().to_string();
+    let out = text(&a.kgo(&["run", "--cpu", &cpus, "nginx"]).stdout);
+    assert!(out.contains("localhost"), "{out}");
+    let out = text(&a.kgo(&["run", "nginx"]).stdout);
+    assert!(out.contains(&addr_b), "{out}");
+    assert!(text(&b.kgo(&["ps"]).stdout).contains("nginx"));
+
+    // plus aucune place nulle part
+    let out = a.kgo(&["run", "--cpu", &cpus, "nginx"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("CPU libres"), "{}", text(&out.stderr));
+
+    a.stop();
+    b.stop();
+    std::fs::remove_dir_all(&base).ok();
+}
