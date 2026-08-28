@@ -34,11 +34,11 @@ async fn join(addr: &str, data_dir: &Path) -> anyhow::Result<()> {
 pub async fn nodes(data_dir: &Path) -> anyhow::Result<()> {
     match client::send(data_dir, &Request::Nodes).await? {
         Response::Nodes(nodes) => {
-            println!("{:<24} {:<18} {:<5} {:<8} STATUT", "ADRESSE", "ID", "CPU", "VERSION");
+            println!("{:<24} {:<18} {:<7} {:<8} STATUT", "ADRESSE", "ID", "CPU", "VERSION");
             for n in nodes {
                 match n.info {
-                    Ok(i) => println!("{:<24} {:<18} {:<5} {:<8} up", n.addr, i.id, i.cpus, i.version),
-                    Err(e) => println!("{:<24} {:<18} {:<5} {:<8} injoignable ({e})", n.addr, "-", "-", "-"),
+                    Ok(i) => println!("{:<24} {:<18} {:<7} {:<8} up", n.addr, i.id, format!("{}/{}", i.free_cpus(), i.cpus), i.version),
+                    Err(e) => println!("{:<24} {:<18} {:<7} {:<8} injoignable ({e})", n.addr, "-", "-", "-"),
                 }
             }
         }
@@ -54,7 +54,9 @@ pub async fn run(args: RunArgs, on: Option<&str>, data_dir: &Path) -> anyhow::Re
         cpu: args.cpu,
         memory: args.memory,
     };
-    match client::send_on(data_dir, on, Request::Run(spec)).await? {
+    let request = if on.is_some() { Request::Run(spec) } else { Request::Schedule(spec) };
+    match client::send_on(data_dir, on, request).await? {
+        Response::Placed { addr, workload: w } => println!("{} ({}) : {} sur {addr}", w.id, w.spec.image, w.state),
         Response::Started(w) => println!("{} ({}) : {}", w.id, w.spec.image, w.state),
         Response::Error(e) => anyhow::bail!("{e}"),
         other => anyhow::bail!("réponse inattendue : {other:?}"),

@@ -11,7 +11,7 @@ use crate::client;
 use crate::protocol::{NodeInfo, NodeStatus, Request, Response};
 use crate::runtime::DockerRuntime;
 use crate::store::Store;
-use crate::workload::{Workload, WorkloadState};
+use crate::workload::{Workload, WorkloadSpec, WorkloadState};
 
 pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join("kgo.sock")
@@ -61,6 +61,8 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>) -> anyhow:
         version: env!("CARGO_PKG_VERSION").to_string(),
         cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
         port,
+        used_cpus: 0,
+        used_memory: 0,
     };
     let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, token });
     reconcile(&node).await?;
@@ -134,7 +136,7 @@ where
 async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
     let allowed = match origin {
         Origin::Local => true,
-        Origin::Peer => !matches!(request, Request::Forward { .. }),
+        Origin::Peer => !matches!(request, Request::Forward { .. } | Request::Schedule(_)),
         Origin::Anonymous => matches!(request, Request::Info),
     };
     if !allowed {
@@ -144,11 +146,9 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
     let result = match request {
         Request::AddPeer { addr } => store.add_peer(&addr).map(|()| Response::PeerAdded),
         Request::Nodes => nodes(node).await.map(Response::Nodes),
-        Request::Info => Ok(Response::Info(node.info.clone())),
-        Request::Run(spec) => store.create(spec).map(|workload| {
-            tokio::spawn(launch(Arc::clone(store), workload.clone()));
-            Response::Started(workload)
-        }),
+        Request::Info => node.current_info().map(Response::Info),
+        Request::Run(spec) => run(node, spec).map(Response::Started),
+        Request::Schedule(spec) => schedule(node, spec).await,
         Request::Ps { all } => store.list().map(|mut workloads| {
             if !all {
                 workloads.retain(|w| w.state.is_active());
@@ -161,6 +161,49 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
         }
     };
     result.unwrap_or_else(|e| Response::Error(format!("{e:#}")))
+}
+
+impl Node {
+    /// Les infos du nœud, avec les ressources réservées à cet instant.
+    fn current_info(&self) -> anyhow::Result<NodeInfo> {
+        let mut info = self.info.clone();
+        for w in self.store.list()?.iter().filter(|w| w.state.is_active()) {
+            info.used_cpus += w.spec.cpu;
+            info.used_memory += w.spec.memory;
+        }
+        Ok(info)
+    }
+}
+
+fn run(node: &Node, spec: WorkloadSpec) -> anyhow::Result<Workload> {
+    let free = node.current_info()?.free_cpus();
+    anyhow::ensure!(spec.cpu <= free, "{} CPU demandés, {free} libres", spec.cpu);
+    let workload = node.store.create(spec)?;
+    tokio::spawn(launch(Arc::clone(&node.store), workload.clone()));
+    Ok(workload)
+}
+
+/// Choisit le nœud qui a le plus de CPU libres (le local à égalité) et y lance le workload.
+async fn schedule(node: &Node, spec: WorkloadSpec) -> anyhow::Result<Response> {
+    let (addr, target) = nodes(node)
+        .await?
+        .into_iter()
+        .rev()
+        .filter_map(|n| Some((n.addr, n.info.ok()?)))
+        .filter(|(_, info)| info.free_cpus() >= spec.cpu)
+        .max_by_key(|(_, info)| info.free_cpus())
+        .with_context(|| format!("aucun nœud n'a {} CPU libres", spec.cpu))?;
+
+    let response = if target.id == node.info.id {
+        Response::Started(run(node, spec)?)
+    } else {
+        let token = node.token.as_deref().unwrap_or_default();
+        client::send_to_peer(&addr, token, &Request::Run(spec)).await?
+    };
+    Ok(match response {
+        Response::Started(workload) => Response::Placed { addr, workload },
+        other => other,
+    })
 }
 
 /// Le nœud local suivi de ses pairs, interrogés en parallèle.
@@ -187,7 +230,7 @@ async fn nodes(node: &Node) -> anyhow::Result<Vec<NodeStatus>> {
 
     let mut statuses = vec![NodeStatus {
         addr: format!("localhost:{}", node.info.port),
-        info: Ok(node.info.clone()),
+        info: node.current_info().map_err(|e| format!("{e:#}")),
     }];
     statuses.extend(peers);
     Ok(statuses)

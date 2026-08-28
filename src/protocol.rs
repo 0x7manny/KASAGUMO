@@ -8,6 +8,15 @@ pub struct NodeInfo {
     pub version: String,
     pub cpus: u32,
     pub port: u16,
+    /// Ressources réservées par les workloads actifs.
+    pub used_cpus: u32,
+    pub used_memory: u64,
+}
+
+impl NodeInfo {
+    pub fn free_cpus(&self) -> u32 {
+        self.cpus.saturating_sub(self.used_cpus)
+    }
 }
 
 /// Un nœud tel que vu par `kgo nodes` : `info` est vide si le pair est injoignable.
@@ -20,6 +29,8 @@ pub struct NodeStatus {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     Run(WorkloadSpec),
+    /// Place le workload sur le nœud le plus libre du cluster (réservé au CLI local).
+    Schedule(WorkloadSpec),
     Ps { all: bool },
     Stop { id: String },
     Info,
@@ -32,6 +43,7 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     Started(Workload),
+    Placed { addr: String, workload: Workload },
     Workloads(Vec<Workload>),
     Stopped,
     Info(NodeInfo),
