@@ -32,7 +32,7 @@ kgo node join 192.168.1.10:7070
 # List available nodes
 kgo nodes
 
-# Run a workload
+# Run a workload (placed on the node with the most free CPUs)
 kgo run --cpu 2 --memory 4GB nginx:latest
 
 # Run on a peer (same token on both nodes)
