@@ -13,6 +13,10 @@ anyhow = "1.0.104"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time", "process"] }
 serde_json = "1.0.151"
 redb = "4.3.0"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+hmac = "0.12"
 
 
 [[bin]]
