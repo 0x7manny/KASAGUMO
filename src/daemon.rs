@@ -6,10 +6,12 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinSet;
+use tokio_rustls::TlsAcceptor;
 
 use crate::client;
 use crate::protocol::{NodeInfo, NodeStatus, Request, Response};
 use crate::runtime::DockerRuntime;
+use crate::secure::{self, SessionKey};
 use crate::store::Store;
 use crate::workload::{Workload, WorkloadSpec, WorkloadState};
 
@@ -22,6 +24,7 @@ struct Node {
     runtime: DockerRuntime,
     info: NodeInfo,
     token: Option<String>,
+    tls: TlsAcceptor,
 }
 
 /// Origine d'une connexion : le socket Unix est de confiance ; sur le port TCP,
@@ -64,7 +67,7 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>) -> anyhow:
         used_cpus: 0,
         used_memory: 0,
     };
-    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, token });
+    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, token, tls: secure::acceptor()? });
     reconcile(&node).await?;
     println!("nœud {} démarré", node.info.id);
     println!("socket : {}", path.display());
@@ -75,11 +78,17 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>) -> anyhow:
         tokio::select! {
             accepted = unix.accept() => {
                 let (stream, _) = accepted?;
-                spawn_handler(stream, Arc::clone(&node), true);
+                let node = Arc::clone(&node);
+                spawn_handler(async move { handle(stream, &node, None).await });
             }
             accepted = tcp.accept() => {
                 let (stream, _) = accepted?;
-                spawn_handler(stream, Arc::clone(&node), false);
+                let node = Arc::clone(&node);
+                spawn_handler(async move {
+                    let tls = node.tls.accept(stream).await?;
+                    let key = secure::session_key(tls.get_ref().1)?;
+                    handle(tls, &node, Some(key)).await
+                });
             }
             _ = tokio::signal::ctrl_c() => break,
             _ = sigterm.recv() => break,
@@ -91,18 +100,16 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>) -> anyhow:
     Ok(())
 }
 
-fn spawn_handler<S>(stream: S, node: Arc<Node>, local: bool)
-where
-    S: AsyncRead + AsyncWrite + Send + 'static,
-{
+fn spawn_handler(connection: impl Future<Output = anyhow::Result<()>> + Send + 'static) {
     tokio::spawn(async move {
-        if let Err(e) = handle(stream, &node, local).await {
+        if let Err(e) = connection.await {
             eprintln!("connexion en erreur : {e:#}");
         }
     });
 }
 
-async fn handle<S>(stream: S, node: &Node, local: bool) -> anyhow::Result<()>
+/// `key` : clé de session TLS, absente sur le socket Unix.
+async fn handle<S>(stream: S, node: &Node, key: Option<SessionKey>) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite,
 {
@@ -110,14 +117,18 @@ where
     let mut writer = Box::pin(writer);
     let mut lines = BufReader::new(reader).lines();
 
-    // sur TCP, la première ligne est le token du cluster
-    let origin = if local {
-        Origin::Local
-    } else {
-        let sent = lines.next_line().await?.unwrap_or_default();
-        match node.token.as_deref() {
-            Some(token) if token == sent => Origin::Peer,
-            _ => Origin::Anonymous,
+    // sur TCP, le pair ouvre par sa preuve du token, à quoi le nœud répond par la sienne
+    let origin = match key {
+        None => Origin::Local,
+        Some(key) => {
+            let sent = lines.next_line().await?.unwrap_or_default();
+            let token = node.token.as_deref().unwrap_or_default();
+            writer.write_all(format!("{}\n", secure::proof(token, &key, "server")).as_bytes()).await?;
+            if !token.is_empty() && secure::same(&sent, &secure::proof(token, &key, "client")) {
+                Origin::Peer
+            } else {
+                Origin::Anonymous
+            }
         }
     };
 

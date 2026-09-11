@@ -1,12 +1,15 @@
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixStream};
+use rustls::pki_types::ServerName;
 
 use crate::daemon::socket_path;
 use crate::protocol::{Request, Response};
+use crate::secure::{self, SessionKey};
 
 const PEER_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -32,32 +35,43 @@ pub async fn send_on(data_dir: &Path, on: Option<&str>, request: Request) -> any
 /// Envoie une requête à un nœud distant (`token` : secret du cluster, vide si inconnu), avec un délai maximum.
 pub async fn send_to_peer(addr: &str, token: &str, request: &Request) -> anyhow::Result<Response> {
     let attempt = async {
-        let stream = TcpStream::connect(addr)
+        let tcp = TcpStream::connect(addr)
             .await
             .with_context(|| format!("connexion à {addr} impossible"))?;
-        exchange(stream, Some(token), request).await
+        let name = ServerName::try_from(secure::SERVER_NAME)?;
+        let tls = secure::connector()?.connect(name, tcp).await.with_context(|| format!("{addr} ne parle pas TLS"))?;
+        let key = secure::session_key(tls.get_ref().1)?;
+        exchange(tls, Some((token, key)), request).await
     };
     tokio::time::timeout(PEER_TIMEOUT, attempt)
         .await
         .map_err(|_| anyhow::anyhow!("{addr} ne répond pas"))?
 }
 
-async fn exchange<S>(stream: S, token: Option<&str>, request: &Request) -> anyhow::Result<Response>
+/// `peer` : token du cluster et clé de session, pour la preuve échangée avant la requête.
+async fn exchange<S>(stream: S, peer: Option<(&str, SessionKey)>, request: &Request) -> anyhow::Result<Response>
 where
     S: AsyncRead + AsyncWrite,
 {
     let (reader, writer) = tokio::io::split(stream);
     let mut writer = Box::pin(writer);
 
-    let mut out = token.map(|t| format!("{t}\n").into_bytes()).unwrap_or_default();
+    let mut out = Vec::new();
+    if let Some((token, key)) = &peer {
+        writeln!(out, "{}", secure::proof(token, key, "client"))?;
+    }
     serde_json::to_writer(&mut out, request)?;
     out.push(b'\n');
     writer.write_all(&out).await?;
 
-    let line = BufReader::new(reader)
-        .lines()
-        .next_line()
-        .await?
-        .context("le nœud a fermé la connexion sans répondre")?;
+    let mut lines = BufReader::new(reader).lines();
+    if let Some((token, key)) = &peer {
+        let sent = lines.next_line().await?.unwrap_or_default();
+        anyhow::ensure!(
+            token.is_empty() || secure::same(&sent, &secure::proof(token, key, "server")),
+            "le pair ne connaît pas le token du cluster"
+        );
+    }
+    let line = lines.next_line().await?.context("le nœud a fermé la connexion sans répondre")?;
     Ok(serde_json::from_str(&line)?)
 }

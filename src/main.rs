@@ -4,6 +4,7 @@ mod commands;
 mod daemon;
 mod protocol;
 mod runtime;
+mod secure;
 mod store;
 mod workload;
 
