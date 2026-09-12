@@ -68,11 +68,11 @@ struct Daemon {
 
 impl Daemon {
     fn start(dir: &std::path::Path) -> Self {
-        Self::start_with_docker(dir, true)
+        Self::start_with_docker(dir, true, TOKEN)
     }
 
     /// `containers_alive` : ce que répond le docker factice à `docker inspect`.
-    fn start_with_docker(dir: &std::path::Path, containers_alive: bool) -> Self {
+    fn start_with_docker(dir: &std::path::Path, containers_alive: bool, token: &str) -> Self {
         use std::io::BufRead;
         use std::os::unix::fs::PermissionsExt;
 
@@ -84,7 +84,7 @@ impl Daemon {
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_kgo"))
             .args(["node", "start", "--port", "0", "--data-dir", dir.to_str().unwrap()])
-            .env("KGO_TOKEN", TOKEN)
+            .env("KGO_TOKEN", token)
             .env("KGO_DOCKER", &docker) // docker factice : toutes les commandes réussissent
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -176,34 +176,33 @@ fn cycle_de_vie_et_persistance() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Envoie une requête JSON brute sur le port TCP du nœud, précédée du token.
-fn tcp_request(port: u16, token: &str, request: &str) -> String {
-    use std::io::{BufRead, Write};
-
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    writeln!(stream, "{token}\n{request}").unwrap();
-    let mut line = String::new();
-    std::io::BufReader::new(stream).read_line(&mut line).unwrap();
-    line
-}
-
 #[test]
-fn le_port_tcp_exige_le_token_hors_info() {
-    let dir = std::env::temp_dir().join(format!("kgo-tcp-{}", std::process::id()));
-    let daemon = Daemon::start(&dir);
+fn le_port_tcp_est_chiffre_et_exige_le_token() {
+    use std::io::{Read, Write};
 
-    let info = tcp_request(daemon.port, "", r#""Info""#);
-    assert!(info.contains("\"cpus\"") && info.contains(&format!("\"port\":{}", daemon.port)), "{info}");
+    let base = std::env::temp_dir().join(format!("kgo-tls-{}", std::process::id()));
+    let a = Daemon::start(&base.join("a"));
+    let intrus = Daemon::start_with_docker(&base.join("intrus"), true, "autre");
 
-    let ps = r#"{"Ps":{"all":true}}"#;
-    for token in ["", "mauvais"] {
-        let refused = tcp_request(daemon.port, token, ps);
-        assert!(refused.contains("refusée"), "{refused}");
-    }
-    assert!(tcp_request(daemon.port, TOKEN, ps).contains("Workloads"));
+    // en clair, le nœud ne répond rien d'exploitable
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", a.port)).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    writeln!(stream, r#""Info""#).unwrap();
+    let mut reply = Vec::new();
+    stream.read_to_end(&mut reply).ok();
+    assert!(!String::from_utf8_lossy(&reply).contains("cpus"));
 
-    daemon.stop();
-    std::fs::remove_dir_all(&dir).ok();
+    // un pair qui n'a pas le même token est rejeté, dans les deux sens
+    let on = format!("127.0.0.1:{}", a.port);
+    let out = intrus.kgo(&["--on", &on, "ps"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("token"), "{}", text(&out.stderr));
+    let out = a.kgo(&["--on", &format!("127.0.0.1:{}", intrus.port), "ps"]);
+    assert!(text(&out.stderr).contains("token"), "{}", text(&out.stderr));
+
+    a.stop();
+    intrus.stop();
+    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -245,7 +244,7 @@ fn reconciliation_au_redemarrage() {
 
     // le daemon redémarre alors que le conteneur a disparu : le workload devient failed
     daemon.stop();
-    let daemon = Daemon::start_with_docker(&dir, false);
+    let daemon = Daemon::start_with_docker(&dir, false, TOKEN);
     assert!(text(&daemon.kgo(&["ps"]).stdout).contains("aucun workload"));
     let all = text(&daemon.kgo(&["ps", "--all"]).stdout);
     assert!(all.contains(&id) && all.contains("failed"), "{all}");
