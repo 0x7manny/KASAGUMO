@@ -57,6 +57,10 @@ pub enum NodeAction {
         /// Secret partagé par les nœuds du cluster (sans lui, les pairs ne peuvent rien lancer)
         #[arg(long, env = "KGO_TOKEN", hide_env_values = true)]
         token: Option<String>,
+
+        /// Délai entre deux battements de cœur vers les pairs (ms)
+        #[arg(long, default_value_t = 5000)]
+        heartbeat_ms: u64,
     },
     /// Ajouter un autre nœud à la liste des pairs
     Join {

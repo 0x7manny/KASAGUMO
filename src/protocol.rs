@@ -26,7 +26,7 @@ pub struct NodeStatus {
     pub info: Result<NodeInfo, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     Run(WorkloadSpec),
     /// Place le workload sur le nœud le plus libre du cluster (réservé au CLI local).
@@ -36,6 +36,8 @@ pub enum Request {
     Info,
     AddPeer { addr: String },
     Nodes,
+    /// Battement de cœur d'un pair : annonce son port d'écoute, reçoit les pairs connus.
+    Hello { port: u16 },
     /// Fait exécuter la requête par un pair (le nœud local s'authentifie pour le CLI).
     Forward { addr: String, request: Box<Request> },
 }
@@ -48,6 +50,7 @@ pub enum Response {
     Stopped,
     Info(NodeInfo),
     PeerAdded,
+    Peers(Vec<String>),
     Nodes(Vec<NodeStatus>),
     Error(String),
 }

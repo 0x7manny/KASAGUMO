@@ -73,5 +73,6 @@ where
         );
     }
     let line = lines.next_line().await?.context("le nœud a fermé la connexion sans répondre")?;
+    writer.shutdown().await.ok(); // close_notify TLS
     Ok(serde_json::from_str(&line)?)
 }

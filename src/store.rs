@@ -3,9 +3,10 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
-use crate::workload::{Workload, WorkloadSpec, WorkloadState};
+use crate::workload::{Placement, Workload, WorkloadSpec, WorkloadState};
 
 const WORKLOADS: TableDefinition<&str, &[u8]> = TableDefinition::new("workloads");
+const PLACEMENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("placements");
 const PEERS: TableDefinition<&str, ()> = TableDefinition::new("peers");
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 
@@ -21,6 +22,7 @@ impl Store {
         tx.open_table(WORKLOADS)?;
         tx.open_table(META)?;
         tx.open_table(PEERS)?;
+        tx.open_table(PLACEMENTS)?;
         tx.commit()?;
         Ok(Self { db })
     }
@@ -111,6 +113,30 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn place(&self, id: &str, placement: &Placement) -> anyhow::Result<()> {
+        let tx = self.db.begin_write()?;
+        tx.open_table(PLACEMENTS)?.insert(id, serde_json::to_vec(placement)?.as_slice())?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn unplace(&self, id: &str) -> anyhow::Result<()> {
+        let tx = self.db.begin_write()?;
+        tx.open_table(PLACEMENTS)?.remove(id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn placements(&self) -> anyhow::Result<Vec<(String, Placement)>> {
+        let tx = self.db.begin_read()?;
+        let mut placements = Vec::new();
+        for entry in tx.open_table(PLACEMENTS)?.iter()? {
+            let (id, value) = entry?;
+            placements.push((id.value().to_string(), serde_json::from_slice(value.value())?));
+        }
+        Ok(placements)
     }
 
     pub fn add_peer(&self, addr: &str) -> anyhow::Result<()> {

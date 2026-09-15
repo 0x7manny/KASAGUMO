@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Context;
 use kasagumo::FilePrimitive;
@@ -10,7 +11,7 @@ use crate::{client, daemon};
 
 pub async fn node(action: NodeAction, data_dir: &Path) -> anyhow::Result<()> {
     match action {
-        NodeAction::Start { port, token } => daemon::serve(data_dir, port, token).await,
+        NodeAction::Start { port, token, heartbeat_ms } => daemon::serve(data_dir, port, token, Duration::from_millis(heartbeat_ms)).await,
         NodeAction::Join { addr } => join(&addr, data_dir).await,
     }
 }
