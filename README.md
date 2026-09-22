@@ -24,16 +24,16 @@ It describes a cloud that forms like a hat over **Mount Fuji**.
 
 ```bash
 # Start a node
-kasagumo node start
+kgo node start
 
 # List available nodes
-kasagumo nodes
+kgo nodes
 
 # Run a workload
-kasagumo run --cpu 2 --memory 4GB nginx:latest
+kgo run --cpu 2 --memory 4GB nginx:latest
 
 # List running workloads
-kasagumo ps
+kgo ps
 
 # Stop a workload
-kasagumo stop <workload-id>
+kgo stop <workload-id>
