@@ -83,7 +83,7 @@ impl Daemon {
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_kgo"))
-            .args(["node", "start", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+            .args(["node", "start", "--port", "0", "--heartbeat-ms", "100", "--data-dir", dir.to_str().unwrap()])
             .env("KGO_TOKEN", token)
             .env("KGO_DOCKER", &docker) // docker factice : toutes les commandes réussissent
             .stdout(std::process::Stdio::piped())
@@ -299,5 +299,61 @@ fn run_choisit_le_noeud_le_plus_libre() {
 
     a.stop();
     b.stop();
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// Attend que `check` soit vrai, au plus ~5 s.
+fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if check() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{what}");
+}
+
+#[test]
+fn les_pairs_se_decouvrent_par_gossip() {
+    let base = std::env::temp_dir().join(format!("kgo-gossip-{}", std::process::id()));
+    let (a, b, c) = (Daemon::start(&base.join("a")), Daemon::start(&base.join("b")), Daemon::start(&base.join("c")));
+    let addr = |d: &Daemon| format!("127.0.0.1:{}", d.port);
+
+    // a et c ne connaissent que b ; b apprend a et c par leurs battements, puis les leur transmet
+    assert!(a.kgo(&["node", "join", &addr(&b)]).status.success());
+    assert!(c.kgo(&["node", "join", &addr(&b)]).status.success());
+    wait_until("a n'a pas découvert c", || {
+        let nodes = text(&a.kgo(&["nodes"]).stdout);
+        nodes.contains(&addr(&c)) && nodes.matches(" up").count() == 3
+    });
+
+    a.stop();
+    b.stop();
+    c.stop();
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn un_pair_tombe_ses_workloads_sont_replaces() {
+    let base = std::env::temp_dir().join(format!("kgo-failover-{}", std::process::id()));
+    let mut nodes = vec![Daemon::start(&base.join("a")), Daemon::start(&base.join("b")), Daemon::start(&base.join("c"))];
+    let addr = |d: &Daemon| format!("127.0.0.1:{}", d.port);
+    for peer in [1, 2] {
+        assert!(nodes[0].kgo(&["node", "join", &addr(&nodes[peer])]).status.success());
+    }
+
+    // a est plein : le workload part sur b ou c, que a surveille
+    let cpus = std::thread::available_parallelism().unwrap().get().to_string();
+    assert!(nodes[0].kgo(&["run", "--cpu", &cpus, "redis"]).status.success());
+    let placed = text(&nodes[0].kgo(&["run", "nginx"]).stdout);
+    let victim = nodes.iter().position(|d| placed.contains(&addr(d))).unwrap();
+    assert_ne!(victim, 0, "{placed}");
+
+    // le pair qui l'héberge tombe : il est relancé sur l'autre
+    let survivor = 3 - victim;
+    nodes.remove(victim).stop();
+    let survivor = if survivor > victim { survivor - 1 } else { survivor };
+    wait_until("nginx n'a pas été relancé", || text(&nodes[survivor].kgo(&["ps"]).stdout).contains("nginx"));
+
     std::fs::remove_dir_all(&base).ok();
 }
