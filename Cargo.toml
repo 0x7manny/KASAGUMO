@@ -1,8 +1,10 @@
 [package]
-name = "KASAGUMO"
+name = "kasagumo"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 sha2 = "0.10.9"
 rand = "0.9.2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
