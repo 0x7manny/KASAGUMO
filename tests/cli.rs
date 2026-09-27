@@ -68,11 +68,16 @@ struct Daemon {
 
 impl Daemon {
     fn start(dir: &std::path::Path) -> Self {
-        Self::start_with_docker(dir, true, TOKEN)
+        Self::start_with_docker(dir, true, TOKEN, 0)
+    }
+
+    /// Redémarre un nœud sur le port qu'il avait.
+    fn start_on(dir: &std::path::Path, port: u16) -> Self {
+        Self::start_with_docker(dir, true, TOKEN, port)
     }
 
     /// `containers_alive` : ce que répond le docker factice à `docker inspect`.
-    fn start_with_docker(dir: &std::path::Path, containers_alive: bool, token: &str) -> Self {
+    fn start_with_docker(dir: &std::path::Path, containers_alive: bool, token: &str, port: u16) -> Self {
         use std::io::BufRead;
         use std::os::unix::fs::PermissionsExt;
 
@@ -83,7 +88,7 @@ impl Daemon {
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_kgo"))
-            .args(["node", "start", "--port", "0", "--heartbeat-ms", "100", "--data-dir", dir.to_str().unwrap()])
+            .args(["node", "start", "--port", &port.to_string(), "--heartbeat-ms", "100", "--data-dir", dir.to_str().unwrap()])
             .env("KGO_TOKEN", token)
             .env("KGO_DOCKER", &docker) // docker factice : toutes les commandes réussissent
             .stdout(std::process::Stdio::piped())
@@ -182,7 +187,7 @@ fn le_port_tcp_est_chiffre_et_exige_le_token() {
 
     let base = std::env::temp_dir().join(format!("kgo-tls-{}", std::process::id()));
     let a = Daemon::start(&base.join("a"));
-    let intrus = Daemon::start_with_docker(&base.join("intrus"), true, "autre");
+    let intrus = Daemon::start_with_docker(&base.join("intrus"), true, "autre", 0);
 
     // en clair, le nœud ne répond rien d'exploitable
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", a.port)).unwrap();
@@ -244,7 +249,7 @@ fn reconciliation_au_redemarrage() {
 
     // le daemon redémarre alors que le conteneur a disparu : le workload devient failed
     daemon.stop();
-    let daemon = Daemon::start_with_docker(&dir, false, TOKEN);
+    let daemon = Daemon::start_with_docker(&dir, false, TOKEN, 0);
     assert!(text(&daemon.kgo(&["ps"]).stdout).contains("aucun workload"));
     let all = text(&daemon.kgo(&["ps", "--all"]).stdout);
     assert!(all.contains(&id) && all.contains("failed"), "{all}");
@@ -351,9 +356,15 @@ fn un_pair_tombe_ses_workloads_sont_replaces() {
 
     // le pair qui l'héberge tombe : il est relancé sur l'autre
     let survivor = 3 - victim;
+    let (port, dir) = (nodes[victim].port, nodes[victim].dir.clone());
     nodes.remove(victim).stop();
     let survivor = if survivor > victim { survivor - 1 } else { survivor };
     wait_until("nginx n'a pas été relancé", || text(&nodes[survivor].kgo(&["ps"]).stdout).contains("nginx"));
+
+    // le pair revient avec son ancien workload : a l'arrête, il n'y a plus de doublon
+    let back = Daemon::start_on(&dir, port);
+    wait_until("le doublon n'a pas été arrêté", || text(&back.kgo(&["ps", "--all"]).stdout).contains("stopped"));
+    assert!(text(&nodes[survivor].kgo(&["ps"]).stdout).contains("nginx"));
 
     std::fs::remove_dir_all(&base).ok();
 }
