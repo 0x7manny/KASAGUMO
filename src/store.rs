@@ -7,6 +7,7 @@ use crate::workload::{Placement, Workload, WorkloadSpec, WorkloadState};
 
 const WORKLOADS: TableDefinition<&str, &[u8]> = TableDefinition::new("workloads");
 const PLACEMENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("placements");
+const ORPHANS: TableDefinition<&str, &str> = TableDefinition::new("orphans");
 const PEERS: TableDefinition<&str, ()> = TableDefinition::new("peers");
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 
@@ -23,6 +24,7 @@ impl Store {
         tx.open_table(META)?;
         tx.open_table(PEERS)?;
         tx.open_table(PLACEMENTS)?;
+        tx.open_table(ORPHANS)?;
         tx.commit()?;
         Ok(Self { db })
     }
@@ -137,6 +139,31 @@ impl Store {
             placements.push((id.value().to_string(), serde_json::from_slice(value.value())?));
         }
         Ok(placements)
+    }
+
+    /// Retient qu'un workload tourne peut-être encore sur `addr`, déclaré tombé.
+    pub fn orphan(&self, id: &str, addr: &str) -> anyhow::Result<()> {
+        let tx = self.db.begin_write()?;
+        tx.open_table(ORPHANS)?.insert(id, addr)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn forget_orphan(&self, id: &str) -> anyhow::Result<()> {
+        let tx = self.db.begin_write()?;
+        tx.open_table(ORPHANS)?.remove(id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn orphans(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let tx = self.db.begin_read()?;
+        let mut orphans = Vec::new();
+        for entry in tx.open_table(ORPHANS)?.iter()? {
+            let (id, addr) = entry?;
+            orphans.push((id.value().to_string(), addr.value().to_string()));
+        }
+        Ok(orphans)
     }
 
     pub fn add_peer(&self, addr: &str) -> anyhow::Result<()> {

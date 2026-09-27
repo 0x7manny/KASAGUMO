@@ -346,6 +346,7 @@ async fn heartbeat(
         match probe? {
             (Ok(Response::Peers(known)), addr) => {
                 misses.remove(&addr);
+                release_orphans(node, &addr).await?;
                 for candidate in known {
                     learn(node, candidate, own).await?;
                 }
@@ -382,8 +383,20 @@ async fn failover(node: &Node, dead: &str) -> anyhow::Result<()> {
             Response::Placed { addr, workload } => {
                 eprintln!("workload {id} : {dead} est tombé, relancé sur {addr} ({})", workload.id);
                 node.store.unplace(&id)?;
+                node.store.orphan(&id, dead)?;
             }
             other => eprintln!("workload {id} : replacement impossible ({other:?})"),
+        }
+    }
+    Ok(())
+}
+
+/// Un pair revenu d'entre les morts : arrête les copies de workloads qu'on a relancés ailleurs.
+async fn release_orphans(node: &Node, addr: &str) -> anyhow::Result<()> {
+    let token = node.token.as_deref().unwrap_or_default();
+    for (id, _) in node.store.orphans()?.into_iter().filter(|(_, at)| at == addr) {
+        if client::send_to_peer(addr, token, &Request::Stop { id: id.clone() }).await.is_ok() {
+            node.store.forget_orphan(&id)?;
         }
     }
     Ok(())
