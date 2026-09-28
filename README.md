@@ -42,5 +42,8 @@ kgo --on 192.168.1.10:7070 run nginx:latest
 # List running workloads (also --on)
 kgo ps
 
+# Show the output of a workload (stop and logs find the hosting node by themselves)
+kgo logs <workload-id>
+
 # Stop a workload
 kgo stop <workload-id>
