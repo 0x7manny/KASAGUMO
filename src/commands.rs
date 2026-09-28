@@ -97,6 +97,16 @@ pub async fn stop(workload_id: &str, on: Option<&str>, data_dir: &Path) -> anyho
     Ok(())
 }
 
+pub async fn logs(workload_id: &str, on: Option<&str>, data_dir: &Path) -> anyhow::Result<()> {
+    let request = Request::Logs { id: workload_id.to_string() };
+    match client::send_on(data_dir, on, request).await? {
+        Response::Logs(output) => print!("{output}"),
+        Response::Error(e) => anyhow::bail!("{e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
+    }
+    Ok(())
+}
+
 pub fn chunk(path: &Path) -> anyhow::Result<()> {
     let file = FilePrimitive::from_path(path)
         .with_context(|| format!("impossible de découper {}", path.display()))?;

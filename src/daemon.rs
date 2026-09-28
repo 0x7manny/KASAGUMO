@@ -158,6 +158,13 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
         return Response::Error("requête refusée : token du cluster manquant ou invalide".to_string());
     }
     let store = &node.store;
+    // un workload confié à un pair se pilote là où il tourne
+    if let Request::Stop { id } | Request::Logs { id } = &request {
+        if let Ok(Some(placement)) = store.placement(id) {
+            let response = forward(node, &placement.addr, &request).await;
+            return response.unwrap_or_else(|e| Response::Error(format!("{e:#}")));
+        }
+    }
     let result = match request {
         Request::AddPeer { addr } => store.add_peer(&addr).map(|()| Response::PeerAdded),
         Request::Nodes => nodes(node).await.map(Response::Nodes),
@@ -171,6 +178,7 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
             Response::Workloads(workloads)
         }),
         Request::Stop { id } => stop(node, &id).await.map(|()| Response::Stopped),
+        Request::Logs { id } => logs(node, &id).await.map(Response::Logs),
         Request::Hello { port } => match origin {
             Origin::Peer(ip) => store
                 .add_peer(&SocketAddr::new(ip, port).to_string())
@@ -285,6 +293,11 @@ async fn launch(store: Arc<Store>, workload: Workload) {
         eprintln!("workload {} en échec : {e:#}", workload.id);
         store.advance(&workload.id, Pulling, Failed).ok();
     }
+}
+
+async fn logs(node: &Node, id: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(node.store.list()?.iter().any(|w| w.id == id), "workload introuvable : {id}");
+    node.runtime.logs(id).await
 }
 
 async fn stop(node: &Node, id: &str) -> anyhow::Result<()> {

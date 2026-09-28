@@ -131,6 +131,13 @@ impl Store {
         Ok(())
     }
 
+    pub fn placement(&self, id: &str) -> anyhow::Result<Option<Placement>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(PLACEMENTS)?;
+        let value = table.get(id)?;
+        Ok(value.map(|v| serde_json::from_slice(v.value())).transpose()?)
+    }
+
     pub fn placements(&self) -> anyhow::Result<Vec<(String, Placement)>> {
         let tx = self.db.begin_read()?;
         let mut placements = Vec::new();

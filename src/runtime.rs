@@ -43,6 +43,13 @@ impl DockerRuntime {
             .is_ok_and(|out| out == "true")
     }
 
+    /// Les dernières lignes de sortie du conteneur (stdout puis stderr).
+    pub async fn logs(&self, workload_id: &str) -> anyhow::Result<String> {
+        let name = container_name(workload_id);
+        let output = run_docker(["logs", "--tail", "200", name.as_str()]).await?;
+        Ok(String::from_utf8_lossy(&[output.stdout, output.stderr].concat()).into_owned())
+    }
+
     pub async fn stop(&self, workload_id: &str) -> anyhow::Result<()> {
         let name = container_name(workload_id);
         docker(["rm", "--force", name.as_str()]).await.map(drop)
@@ -50,6 +57,15 @@ impl DockerRuntime {
 }
 
 async fn docker<I, S>(args: I) -> anyhow::Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = run_docker(args).await?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn run_docker<I, S>(args: I) -> anyhow::Result<std::process::Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
@@ -64,7 +80,7 @@ where
     if !output.status.success() {
         bail!("docker {} : {}", args[0].as_ref().to_string_lossy(), String::from_utf8_lossy(&output.stderr).trim());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output)
 }
 
 #[cfg(test)]

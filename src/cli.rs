@@ -39,6 +39,11 @@ pub enum Command {
         /// Identifiant du workload
         workload_id: String,
     },
+    /// Afficher les dernières lignes de sortie d'un workload
+    Logs {
+        /// Identifiant du workload
+        workload_id: String,
+    },
     /// Découper un fichier en chunks et vérifier son intégrité
     Chunk {
         /// Fichier à découper
