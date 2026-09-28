@@ -83,7 +83,7 @@ impl Daemon {
 
         std::fs::create_dir_all(dir).unwrap();
         let docker = dir.join("fake-docker.sh");
-        let script = format!("#!/bin/sh\n[ \"$1\" = inspect ] && echo {containers_alive}\nexit 0\n");
+        let script = format!("#!/bin/sh\n[ \"$1\" = inspect ] && echo {containers_alive}\n[ \"$1\" = logs ] && echo hello-from-$4\nexit 0\n");
         std::fs::write(&docker, script).unwrap();
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -366,5 +366,26 @@ fn un_pair_tombe_ses_workloads_sont_replaces() {
     wait_until("le doublon n'a pas été arrêté", || text(&back.kgo(&["ps", "--all"]).stdout).contains("stopped"));
     assert!(text(&nodes[survivor].kgo(&["ps"]).stdout).contains("nginx"));
 
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn logs_suivent_le_workload_sur_son_noeud() {
+    let base = std::env::temp_dir().join(format!("kgo-logs-{}", std::process::id()));
+    let (a, b) = (Daemon::start(&base.join("a")), Daemon::start(&base.join("b")));
+    assert!(a.kgo(&["node", "join", &format!("127.0.0.1:{}", b.port)]).status.success());
+
+    // a est plein : le workload part sur b, mais `kgo logs` s'adresse à a
+    let cpus = std::thread::available_parallelism().unwrap().get().to_string();
+    assert!(a.kgo(&["run", "--cpu", &cpus, "redis"]).status.success());
+    let placed = text(&a.kgo(&["run", "nginx"]).stdout);
+    let id = placed.split_whitespace().next().unwrap();
+    assert!(text(&a.kgo(&["logs", id]).stdout).contains(&format!("hello-from-kgo-{id}")));
+
+    let out = a.kgo(&["logs", "inconnu"]);
+    assert_eq!(out.status.code(), Some(1));
+
+    a.stop();
+    b.stop();
     std::fs::remove_dir_all(&base).ok();
 }
