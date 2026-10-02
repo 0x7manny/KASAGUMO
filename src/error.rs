@@ -4,7 +4,7 @@ use crate::chunk::ChunkId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
-    #[error("erreur d'entrée/sortie : {0}")]
+    #[error("erreur d'entrée/sortie")]
     Io(#[from] io::Error),
 
     #[error("nom de fichier invalide : {0}")]
