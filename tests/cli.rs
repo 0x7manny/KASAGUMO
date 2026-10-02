@@ -48,3 +48,39 @@ fn chunk_sur_un_vrai_fichier() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("intégrité : OK"));
 }
+
+#[test]
+fn ps_sans_daemon_explique_quoi_faire() {
+    let dir = std::env::temp_dir().join(format!("kgo-nodaemon-{}", std::process::id()));
+    let out = kgo(&["ps", "--data-dir", dir.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("kgo node start"));
+}
+
+#[test]
+fn ps_parle_au_daemon() {
+    let dir = std::env::temp_dir().join(format!("kgo-daemon-{}", std::process::id()));
+    let dir_str = dir.to_str().unwrap();
+
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_kgo"))
+        .args(["node", "start", "--data-dir", dir_str])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let socket = dir.join("kgo.sock");
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let out = kgo(&["ps", "--data-dir", dir_str]);
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("aucun workload"));
+}
