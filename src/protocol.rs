@@ -7,6 +7,7 @@ pub struct NodeInfo {
     pub id: String,
     pub version: String,
     pub cpus: u32,
+    pub memory: u64,
     pub port: u16,
     /// Ressources réservées par les workloads actifs.
     pub used_cpus: u32,
@@ -16,6 +17,14 @@ pub struct NodeInfo {
 impl NodeInfo {
     pub fn free_cpus(&self) -> u32 {
         self.cpus.saturating_sub(self.used_cpus)
+    }
+
+    pub fn free_memory(&self) -> u64 {
+        self.memory.saturating_sub(self.used_memory)
+    }
+
+    pub fn fits(&self, spec: &WorkloadSpec) -> bool {
+        spec.cpu <= self.free_cpus() && spec.memory <= self.free_memory()
     }
 }
 

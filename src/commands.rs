@@ -35,11 +35,14 @@ async fn join(addr: &str, data_dir: &Path) -> anyhow::Result<()> {
 pub async fn nodes(data_dir: &Path) -> anyhow::Result<()> {
     match client::send(data_dir, &Request::Nodes).await? {
         Response::Nodes(nodes) => {
-            println!("{:<24} {:<18} {:<7} {:<8} STATUT", "ADRESSE", "ID", "CPU", "VERSION");
+            println!("{:<24} {:<18} {:<7} {:<10} {:<8} STATUT", "ADRESSE", "ID", "CPU", "MÉMOIRE", "VERSION");
             for n in nodes {
                 match n.info {
-                    Ok(i) => println!("{:<24} {:<18} {:<7} {:<8} up", n.addr, i.id, format!("{}/{}", i.free_cpus(), i.cpus), i.version),
-                    Err(e) => println!("{:<24} {:<18} {:<7} {:<8} injoignable ({e})", n.addr, "-", "-", "-"),
+                    Ok(i) => {
+                        let (cpu, memory) = (format!("{}/{}", i.free_cpus(), i.cpus), format!("{}/{}Mo", i.free_memory() >> 20, i.memory >> 20));
+                        println!("{:<24} {:<18} {:<7} {:<10} {:<8} up", n.addr, i.id, cpu, memory, i.version)
+                    }
+                    Err(e) => println!("{:<24} {:<18} {:<7} {:<10} {:<8} injoignable ({e})", n.addr, "-", "-", "-", "-"),
                 }
             }
         }

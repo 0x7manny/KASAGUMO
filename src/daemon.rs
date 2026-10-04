@@ -66,6 +66,7 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>, heartbeat:
         id: store.node_id()?,
         version: env!("CARGO_PKG_VERSION").to_string(),
         cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+        memory: total_memory().await.unwrap_or(u64::MAX), // inconnue : pas de limite
         port,
         used_cpus: 0,
         used_memory: 0,
@@ -204,23 +205,30 @@ impl Node {
 }
 
 fn run(node: &Node, spec: WorkloadSpec) -> anyhow::Result<Workload> {
-    let free = node.current_info()?.free_cpus();
-    anyhow::ensure!(spec.cpu <= free, "{} CPU demandés, {free} libres", spec.cpu);
+    let info = node.current_info()?;
+    anyhow::ensure!(
+        info.fits(&spec),
+        "ressources insuffisantes : {} CPU et {} Mo demandés, {} CPU et {} Mo libres",
+        spec.cpu,
+        spec.memory >> 20,
+        info.free_cpus(),
+        info.free_memory() >> 20
+    );
     let workload = node.store.create(spec)?;
     tokio::spawn(launch(Arc::clone(&node.store), workload.clone()));
     Ok(workload)
 }
 
-/// Choisit le nœud qui a le plus de CPU libres (le local à égalité) et y lance le workload.
+/// Choisit le nœud qui a le plus de CPU puis de mémoire libres (le local à égalité) et y lance le workload.
 async fn schedule(node: &Node, spec: WorkloadSpec) -> anyhow::Result<Response> {
     let (addr, target) = nodes(node)
         .await?
         .into_iter()
         .rev()
         .filter_map(|n| Some((n.addr, n.info.ok()?)))
-        .filter(|(_, info)| info.free_cpus() >= spec.cpu)
-        .max_by_key(|(_, info)| info.free_cpus())
-        .with_context(|| format!("aucun nœud n'a {} CPU libres", spec.cpu))?;
+        .filter(|(_, info)| info.fits(&spec))
+        .max_by_key(|(_, info)| (info.free_cpus(), info.free_memory()))
+        .with_context(|| format!("aucun nœud n'a {} CPU et {} Mo libres", spec.cpu, spec.memory >> 20))?;
 
     if target.id == node.info.id {
         return Ok(Response::Placed { addr, workload: run(node, spec)? });
@@ -413,4 +421,14 @@ async fn release_orphans(node: &Node, addr: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Mémoire physique de la machine, via `/proc/meminfo` (Linux) ou `sysctl` (macOS).
+async fn total_memory() -> Option<u64> {
+    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+        let kib = meminfo.lines().find_map(|l| l.strip_prefix("MemTotal:")?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok());
+        return kib.map(|kib| kib << 10);
+    }
+    let out = tokio::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().await;
+    out.ok().and_then(|o| String::from_utf8(o.stdout).ok()?.trim().parse().ok())
 }
