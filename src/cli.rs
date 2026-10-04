@@ -44,6 +44,18 @@ pub enum Command {
         /// Identifiant du workload
         workload_id: String,
     },
+    /// Répartir un fichier sur le cluster et afficher son identifiant
+    Put {
+        /// Fichier à stocker
+        path: PathBuf,
+    },
+    /// Récupérer un fichier du cluster à partir de son identifiant
+    Get {
+        /// Identifiant affiché par `kgo put`
+        id: String,
+        /// Fichier à écrire
+        out: PathBuf,
+    },
     /// Découper un fichier en chunks et vérifier son intégrité
     Chunk {
         /// Fichier à découper

@@ -5,12 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
+use crate::blobs::{self, Blobs};
 use crate::client;
 use crate::protocol::{NodeInfo, NodeStatus, Request, Response};
 use crate::runtime::DockerRuntime;
@@ -28,6 +30,7 @@ struct Node {
     info: NodeInfo,
     token: Option<String>,
     tls: TlsAcceptor,
+    blobs: Blobs,
 }
 
 /// Origine d'une connexion : le socket Unix est de confiance ; sur le port TCP,
@@ -71,7 +74,7 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>, heartbeat:
         used_cpus: 0,
         used_memory: 0,
     };
-    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, token, tls: secure::acceptor()? });
+    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, token, tls: secure::acceptor()?, blobs: Blobs::open(data_dir.join("blobs"))? });
     reconcile(&node).await?;
     tokio::spawn(monitor(Arc::clone(&node), heartbeat));
     println!("nœud {} démarré", node.info.id);
@@ -152,7 +155,9 @@ where
 async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
     let allowed = match origin {
         Origin::Local => true,
-        Origin::Peer(_) => !matches!(request, Request::Forward { .. } | Request::Schedule(_)),
+        Origin::Peer(_) => {
+            !matches!(request, Request::Forward { .. } | Request::Schedule(_) | Request::Put { .. } | Request::Get { .. })
+        }
         Origin::Anonymous => matches!(request, Request::Info),
     };
     if !allowed {
@@ -180,6 +185,12 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
         }),
         Request::Stop { id } => stop(node, &id).await.map(|()| Response::Stopped),
         Request::Logs { id } => logs(node, &id).await.map(Response::Logs),
+        Request::Store { data } => blobs::decode(&data)
+            .and_then(|data| node.blobs.put(&data))
+            .map(|id| Response::Stored { id, copies: 1 }),
+        Request::Fetch { id } => node.blobs.get(&id).map(|data| Response::Blob(data.map(|d| blobs::encode(&d)))),
+        Request::Put { data } => put(node, &data).await,
+        Request::Get { id } => get(node, &id).await,
         Request::Hello { port } => match origin {
             Origin::Peer(ip) => store
                 .add_peer(&SocketAddr::new(ip, port).to_string())
@@ -431,4 +442,50 @@ async fn total_memory() -> Option<u64> {
     }
     let out = tokio::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().await;
     out.ok().and_then(|o| String::from_utf8(o.stdout).ok()?.trim().parse().ok())
+}
+
+/// Nombre de copies de chaque bloc.
+const REPLICAS: usize = 2;
+
+/// Range le bloc sur les `REPLICAS` nœuds que le hachage (id du bloc, id du nœud) classe en tête ;
+/// un nœud injoignable est remplacé par le suivant du classement.
+async fn put(node: &Node, hex: &str) -> anyhow::Result<Response> {
+    let data = blobs::decode(hex)?;
+    let id = kasagumo::ChunkId::of(&data).to_string();
+    let mut ranked: Vec<_> = nodes(node).await?.into_iter().filter_map(|n| Some((n.addr, n.info.ok()?))).collect();
+    ranked.sort_by_cached_key(|(_, info)| Sha256::digest(format!("{id}{}", info.id)));
+
+    let token = node.token.as_deref().unwrap_or_default();
+    let mut copies = 0;
+    for (addr, info) in ranked {
+        if copies == REPLICAS {
+            break;
+        }
+        let stored = if info.id == node.info.id {
+            node.blobs.put(&data).is_ok()
+        } else {
+            let store = Request::Store { data: hex.to_string() };
+            matches!(client::send_to_peer(&addr, token, &store).await, Ok(Response::Stored { .. }))
+        };
+        copies += usize::from(stored);
+    }
+    anyhow::ensure!(copies > 0, "aucun nœud n'a pu stocker le bloc {id}");
+    Ok(Response::Stored { id, copies })
+}
+
+/// Cherche le bloc ici puis chez les pairs ; son contenu est revérifié contre son id.
+async fn get(node: &Node, id: &str) -> anyhow::Result<Response> {
+    if let Some(data) = node.blobs.get(id)? {
+        return Ok(Response::Blob(Some(blobs::encode(&data))));
+    }
+    let token = node.token.as_deref().unwrap_or_default();
+    for addr in node.store.peers()? {
+        let fetch = Request::Fetch { id: id.to_string() };
+        if let Ok(Response::Blob(Some(hex))) = client::send_to_peer(&addr, token, &fetch).await {
+            if blobs::decode(&hex).is_ok_and(|data| kasagumo::ChunkId::of(&data).to_string() == id) {
+                return Ok(Response::Blob(Some(hex)));
+            }
+        }
+    }
+    anyhow::bail!("bloc introuvable dans le cluster : {id}")
 }

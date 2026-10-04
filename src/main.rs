@@ -1,3 +1,4 @@
+mod blobs;
 mod cli;
 mod client;
 mod commands;
@@ -25,6 +26,8 @@ async fn main() -> ExitCode {
         Command::Ps { all } => commands::ps(all, cli.on.as_deref(), &cli.data_dir).await,
         Command::Stop { workload_id } => commands::stop(&workload_id, cli.on.as_deref(), &cli.data_dir).await,
         Command::Logs { workload_id } => commands::logs(&workload_id, cli.on.as_deref(), &cli.data_dir).await,
+        Command::Put { path } => commands::put(&path, &cli.data_dir).await,
+        Command::Get { id, out } => commands::get(&id, &out, &cli.data_dir).await,
         Command::Chunk { path } => commands::chunk(&path),
     };
 

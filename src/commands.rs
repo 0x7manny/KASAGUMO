@@ -2,9 +2,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
-use kasagumo::FilePrimitive;
+use kasagumo::{FileChunk, FileManifest, FilePrimitive};
 
 use crate::cli::{NodeAction, RunArgs};
+use crate::blobs;
 use crate::protocol::{Request, Response};
 use crate::workload::WorkloadSpec;
 use crate::{client, daemon};
@@ -107,6 +108,49 @@ pub async fn logs(workload_id: &str, on: Option<&str>, data_dir: &Path) -> anyho
         Response::Error(e) => anyhow::bail!("{e}"),
         other => anyhow::bail!("réponse inattendue : {other:?}"),
     }
+    Ok(())
+}
+
+/// Envoie un bloc au nœud local, qui le répartit ; renvoie son id et le nombre de copies.
+async fn put_blob(data: &[u8], data_dir: &Path) -> anyhow::Result<(String, usize)> {
+    match client::send(data_dir, &Request::Put { data: blobs::encode(data) }).await? {
+        Response::Stored { id, copies } => Ok((id, copies)),
+        Response::Error(e) => anyhow::bail!("{e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
+    }
+}
+
+async fn get_blob(id: &str, data_dir: &Path) -> anyhow::Result<Vec<u8>> {
+    match client::send(data_dir, &Request::Get { id: id.to_string() }).await? {
+        Response::Blob(Some(hex)) => blobs::decode(&hex),
+        Response::Error(e) => anyhow::bail!("{e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
+    }
+}
+
+pub async fn put(path: &Path, data_dir: &Path) -> anyhow::Result<()> {
+    let file = FilePrimitive::from_path(path).with_context(|| format!("impossible de lire {}", path.display()))?;
+    let mut copies = usize::MAX;
+    for chunk in file.chunks() {
+        copies = copies.min(put_blob(&chunk.data, data_dir).await?.1);
+    }
+    // le manifeste est un bloc comme les autres : son id identifie le fichier
+    let (id, manifest_copies) = put_blob(&serde_json::to_vec(file.manifest())?, data_dir).await?;
+    println!("{id}");
+    eprintln!("{} : {} blocs, {} copies minimum", file.name(), file.chunks().len(), copies.min(manifest_copies));
+    Ok(())
+}
+
+pub async fn get(id: &str, out: &Path, data_dir: &Path) -> anyhow::Result<()> {
+    let manifest: FileManifest = serde_json::from_slice(&get_blob(id, data_dir).await?)
+        .context("cet identifiant n'est pas celui d'un fichier")?;
+    let mut chunks = Vec::new();
+    for (index, chunk_id) in manifest.chunks.iter().enumerate() {
+        let data = get_blob(&chunk_id.to_string(), data_dir).await?;
+        chunks.push(FileChunk { id: *chunk_id, index: index as u64, data });
+    }
+    FilePrimitive::from_parts(manifest, chunks)?.write_to_path(out)?;
+    println!("{} écrit", out.display());
     Ok(())
 }
 

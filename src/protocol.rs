@@ -43,6 +43,14 @@ pub enum Request {
     Ps { all: bool },
     Stop { id: String },
     Logs { id: String },
+    /// Range un bloc (hex) sur ce nœud.
+    Store { data: String },
+    /// Demande un bloc à ce nœud.
+    Fetch { id: String },
+    /// Répartit un bloc (hex) sur `REPLICAS` nœuds du cluster (réservé au CLI local).
+    Put { data: String },
+    /// Récupère un bloc n'importe où dans le cluster (réservé au CLI local).
+    Get { id: String },
     Info,
     AddPeer { addr: String },
     Nodes,
@@ -59,6 +67,8 @@ pub enum Response {
     Workloads(Vec<Workload>),
     Stopped,
     Logs(String),
+    Stored { id: String, copies: usize },
+    Blob(Option<String>),
     Info(NodeInfo),
     PeerAdded,
     Peers(Vec<String>),
