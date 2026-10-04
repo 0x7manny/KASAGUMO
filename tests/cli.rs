@@ -300,7 +300,7 @@ fn run_choisit_le_noeud_le_plus_libre() {
     // plus aucune place nulle part
     let out = a.kgo(&["run", "--cpu", &cpus, "nginx"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("CPU libres"), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("CPU et"), "{}", text(&out.stderr));
 
     a.stop();
     b.stop();
@@ -388,4 +388,18 @@ fn logs_suivent_le_workload_sur_son_noeud() {
     a.stop();
     b.stop();
     std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn run_refuse_plus_de_memoire_que_le_nœud_n_en_a() {
+    let dir = std::env::temp_dir().join(format!("kgo-memory-{}", std::process::id()));
+    let daemon = Daemon::start(&dir);
+
+    let out = daemon.kgo(&["run", "--memory", "100000GB", "nginx"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("Mo libres"), "{}", text(&out.stderr));
+    assert!(text(&daemon.kgo(&["nodes"]).stdout).contains("Mo"));
+
+    daemon.stop();
+    std::fs::remove_dir_all(&dir).ok();
 }
