@@ -403,3 +403,46 @@ fn run_refuse_plus_de_memoire_que_le_nœud_n_en_a() {
     daemon.stop();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn put_et_get_repartis_sur_le_cluster() {
+    let base = std::env::temp_dir().join(format!("kgo-blobs-{}", std::process::id()));
+    let (a, b) = (Daemon::start(&base.join("a")), Daemon::start(&base.join("b")));
+    assert!(a.kgo(&["node", "join", &format!("127.0.0.1:{}", b.port)]).status.success());
+
+    // 2,5 Mio : trois blocs de données plus le manifeste
+    std::fs::create_dir_all(&base).unwrap();
+    let (input, output) = (base.join("in.bin"), base.join("out.bin"));
+    let content: Vec<u8> = (0..2_500_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+    std::fs::write(&input, &content).unwrap();
+
+    let out = a.kgo(&["put", input.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let id = text(&out.stdout).trim().to_string();
+    assert!(text(&out.stderr).contains("2 copies minimum"), "{}", text(&out.stderr));
+
+    // depuis l'autre nœud, puis après la chute du premier : les copies suffisent
+    for (reader, path) in [(&b, "b1.bin"), (&b, "b2.bin")] {
+        let path = base.join(path);
+        let out = reader.kgo(&["get", &id, path.to_str().unwrap()]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+        if path.ends_with("b1.bin") {
+            // a disparaît : b garde tous les blocs
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    a.stop();
+    let out = b.kgo(&["get", &id, output.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(std::fs::read(&output).unwrap(), content);
+
+    // identifiant inconnu ou invalide
+    for bad in ["0".repeat(64), "../../etc/passwd".to_string()] {
+        let out = b.kgo(&["get", &bad, output.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(1));
+    }
+
+    b.stop();
+    std::fs::remove_dir_all(&base).ok();
+}
