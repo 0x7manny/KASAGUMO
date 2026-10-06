@@ -45,5 +45,9 @@ kgo ps
 # Show the output of a workload (stop and logs find the hosting node by themselves)
 kgo logs <workload-id>
 
+# Store a file on the cluster (2 copies per block) and get it back by its id
+kgo put ./photo.jpg
+kgo get <file-id> ./photo-copy.jpg
+
 # Stop a workload
 kgo stop <workload-id>
