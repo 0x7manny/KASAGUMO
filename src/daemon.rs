@@ -132,6 +132,7 @@ where
             let sent = lines.next_line().await?.unwrap_or_default();
             let token = node.token.as_deref().unwrap_or_default();
             writer.write_all(format!("{}\n", secure::proof(token, &key, "server")).as_bytes()).await?;
+            writer.flush().await?;
             if !token.is_empty() && secure::same(&sent, &secure::proof(token, &key, "client")) {
                 Origin::Peer(ip)
             } else {
@@ -148,6 +149,7 @@ where
         let mut out = serde_json::to_vec(&response)?;
         out.push(b'\n');
         writer.write_all(&out).await?;
+        writer.flush().await?; // sans flush, la fin d'un gros message peut rester dans le tampon TLS
     }
     Ok(())
 }

@@ -12,6 +12,8 @@ use crate::protocol::{Request, Response};
 use crate::secure::{self, SessionKey};
 
 const PEER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Les transferts de blocs (1 Mio chacun) ont droit à plus de temps.
+const BLOB_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn send(data_dir: &Path, request: &Request) -> anyhow::Result<Response> {
     let path = socket_path(data_dir);
@@ -43,7 +45,8 @@ pub async fn send_to_peer(addr: &str, token: &str, request: &Request) -> anyhow:
         let key = secure::session_key(tls.get_ref().1)?;
         exchange(tls, Some((token, key)), request).await
     };
-    tokio::time::timeout(PEER_TIMEOUT, attempt)
+    let timeout = if matches!(request, Request::Store { .. } | Request::Fetch { .. }) { BLOB_TIMEOUT } else { PEER_TIMEOUT };
+    tokio::time::timeout(timeout, attempt)
         .await
         .map_err(|_| anyhow::anyhow!("{addr} ne répond pas"))?
 }
@@ -63,6 +66,7 @@ where
     serde_json::to_writer(&mut out, request)?;
     out.push(b'\n');
     writer.write_all(&out).await?;
+    writer.flush().await?;
 
     let mut lines = BufReader::new(reader).lines();
     if let Some((token, key)) = &peer {
