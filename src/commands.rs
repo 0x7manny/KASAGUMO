@@ -58,6 +58,8 @@ pub async fn run(args: RunArgs, on: Option<&str>, data_dir: &Path) -> anyhow::Re
         image: args.image,
         cpu: args.cpu,
         memory: args.memory,
+        ports: args.ports,
+        env: args.env,
     };
     let request = if on.is_some() { Request::Run(spec) } else { Request::Schedule(spec) };
     match client::send_on(data_dir, on, request).await? {

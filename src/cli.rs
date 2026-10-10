@@ -96,8 +96,30 @@ pub struct RunArgs {
     #[arg(long, default_value = "512MB", value_parser = parse_memory)]
     pub memory: u64,
 
+    /// Port publié, `hôte:conteneur` (ex : 8080:80), répétable
+    #[arg(short = 'p', long = "publish", value_parser = parse_port)]
+    pub ports: Vec<String>,
+
+    /// Variable d'environnement, `CLÉ=valeur`, répétable
+    #[arg(short = 'e', long = "env", value_parser = parse_env)]
+    pub env: Vec<String>,
+
     /// Image à exécuter (ex : nginx:latest)
     pub image: String,
+}
+
+fn parse_port(input: &str) -> Result<String, String> {
+    let valid = input
+        .split_once(':')
+        .is_some_and(|(host, container)| host.parse::<u16>().is_ok_and(|p| p > 0) && container.parse::<u16>().is_ok_and(|p| p > 0));
+    if valid { Ok(input.to_string()) } else { Err(format!("« {input} » : attendu hôte:conteneur (ex : 8080:80)")) }
+}
+
+fn parse_env(input: &str) -> Result<String, String> {
+    match input.split_once('=') {
+        Some((key, _)) if !key.is_empty() => Ok(input.to_string()),
+        _ => Err(format!("« {input} » : attendu CLÉ=valeur")),
+    }
 }
 
 pub fn parse_memory(input: &str) -> Result<u64, String> {
@@ -159,6 +181,18 @@ mod tests {
                 assert_eq!((a.cpu, a.memory, a.image.as_str()), (2, 4 << 30, "nginx:latest"));
             }
             other => panic!("mauvaise commande : {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ports_et_variables() {
+        let cli = Cli::try_parse_from(["kgo", "run", "-p", "8080:80", "-e", "A=1", "-e", "B=", "nginx"]).unwrap();
+        match cli.command {
+            Command::Run(a) => assert_eq!((a.ports, a.env), (vec!["8080:80".to_string()], vec!["A=1".to_string(), "B=".to_string()])),
+            other => panic!("mauvaise commande : {other:?}"),
+        }
+        for bad in [["-p", "80"], ["-p", "a:80"], ["-p", "0:80"], ["-e", "=x"], ["-e", "NOPE"]] {
+            assert!(Cli::try_parse_from(["kgo", "run", bad[0], bad[1], "nginx"]).is_err(), "{bad:?}");
         }
     }
 

@@ -7,6 +7,12 @@ pub struct WorkloadSpec {
     pub image: String,
     pub cpu: u32,
     pub memory: u64,
+    /// Ports publiés, au format `hôte:conteneur`.
+    #[serde(default)]
+    pub ports: Vec<String>,
+    /// Variables d'environnement, au format `CLÉ=valeur`.
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -10,17 +10,24 @@ pub fn container_name(workload_id: &str) -> String {
 
 /// Arguments de `docker run` pour un workload (limites CPU/mémoire incluses).
 pub fn run_args(workload: &Workload) -> Vec<String> {
-    vec![
-        "run".into(),
+    let spec = &workload.spec;
+    let mut args = vec![
+        "run".to_string(),
         "--detach".into(),
         "--name".into(),
         container_name(&workload.id),
         "--cpus".into(),
-        workload.spec.cpu.to_string(),
+        spec.cpu.to_string(),
         "--memory".into(),
-        workload.spec.memory.to_string(),
-        workload.spec.image.clone(),
-    ]
+        spec.memory.to_string(),
+    ];
+    for (flag, values) in [("--publish", &spec.ports), ("--env", &spec.env)] {
+        for value in values {
+            args.extend([flag.to_string(), value.clone()]);
+        }
+    }
+    args.push(spec.image.clone());
+    args
 }
 
 /// Exécute les workloads en pilotant la CLI `docker` (remplaçable via `KGO_DOCKER`).
@@ -92,12 +99,21 @@ mod tests {
     fn arguments_docker_avec_limites() {
         let workload = Workload {
             id: "ab12cd34".into(),
-            spec: WorkloadSpec { image: "nginx:latest".into(), cpu: 2, memory: 4 << 30 },
+            spec: WorkloadSpec {
+                image: "nginx:latest".into(),
+                cpu: 2,
+                memory: 4 << 30,
+                ports: vec!["8080:80".into()],
+                env: vec!["MODE=prod".into()],
+            },
             state: WorkloadState::Pending,
         };
         assert_eq!(
             run_args(&workload),
-            ["run", "--detach", "--name", "kgo-ab12cd34", "--cpus", "2", "--memory", "4294967296", "nginx:latest"]
+            [
+                "run", "--detach", "--name", "kgo-ab12cd34", "--cpus", "2", "--memory", "4294967296",
+                "--publish", "8080:80", "--env", "MODE=prod", "nginx:latest"
+            ]
         );
     }
 }
