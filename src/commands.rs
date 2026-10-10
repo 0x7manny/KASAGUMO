@@ -2,7 +2,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
-use kasagumo::{FileChunk, FileManifest, FilePrimitive};
+use kasagumo::{CHUNK_SIZE, ChunkId, FileManifest, FilePrimitive, chunk_path};
+use sha2::{Digest, Sha256};
+use std::io::Write;
 
 use crate::cli::{NodeAction, RunArgs};
 use crate::blobs;
@@ -130,29 +132,56 @@ async fn get_blob(id: &str, data_dir: &Path) -> anyhow::Result<Vec<u8>> {
     }
 }
 
+/// Le fichier est lu et envoyé bloc par bloc : au plus deux blocs en mémoire à la fois.
 pub async fn put(path: &Path, data_dir: &Path) -> anyhow::Result<()> {
-    let file = FilePrimitive::from_path(path).with_context(|| format!("impossible de lire {}", path.display()))?;
-    let mut copies = usize::MAX;
-    for chunk in file.chunks() {
-        copies = copies.min(put_blob(&chunk.data, data_dir).await?.1);
+    let (blocks, mut queue) = tokio::sync::mpsc::channel(2);
+    let source = path.to_path_buf();
+    let chunker = tokio::task::spawn_blocking(move || {
+        chunk_path(source, CHUNK_SIZE, |chunk| {
+            blocks.blocking_send(chunk.data).map_err(|_| std::io::Error::other("envoi interrompu"))?;
+            Ok(())
+        })
+    });
+
+    let (mut count, mut copies) = (0, usize::MAX);
+    while let Some(data) = queue.recv().await {
+        copies = copies.min(put_blob(&data, data_dir).await?.1);
+        count += 1;
     }
+    let manifest = chunker.await?.with_context(|| format!("impossible de lire {}", path.display()))?;
+
     // le manifeste est un bloc comme les autres : son id identifie le fichier
-    let (id, manifest_copies) = put_blob(&serde_json::to_vec(file.manifest())?, data_dir).await?;
+    let (id, manifest_copies) = put_blob(&serde_json::to_vec(&manifest)?, data_dir).await?;
     println!("{id}");
-    eprintln!("{} : {} blocs, {} copies minimum", file.name(), file.chunks().len(), copies.min(manifest_copies));
+    eprintln!("{} : {count} blocs, {} copies minimum", manifest.name, copies.min(manifest_copies));
     Ok(())
 }
 
 pub async fn get(id: &str, out: &Path, data_dir: &Path) -> anyhow::Result<()> {
     let manifest: FileManifest = serde_json::from_slice(&get_blob(id, data_dir).await?)
         .context("cet identifiant n'est pas celui d'un fichier")?;
-    let mut chunks = Vec::new();
-    for (index, chunk_id) in manifest.chunks.iter().enumerate() {
-        let data = get_blob(&chunk_id.to_string(), data_dir).await?;
-        chunks.push(FileChunk { id: *chunk_id, index: index as u64, data });
+    let mut file = std::fs::File::create(out).with_context(|| format!("impossible d'écrire {}", out.display()))?;
+    let result = write_blocks(&manifest, &mut file, data_dir).await;
+    if result.is_err() {
+        std::fs::remove_file(out).ok(); // pas de fichier tronqué ou altéré
     }
-    FilePrimitive::from_parts(manifest, chunks)?.write_to_path(out)?;
+    result?;
     println!("{} écrit", out.display());
+    Ok(())
+}
+
+/// Écrit les blocs un par un en vérifiant chacun, puis la taille et l'empreinte du fichier entier.
+async fn write_blocks(manifest: &FileManifest, file: &mut std::fs::File, data_dir: &Path) -> anyhow::Result<()> {
+    let (mut hasher, mut size) = (Sha256::new(), 0u64);
+    for chunk_id in &manifest.chunks {
+        let data = get_blob(&chunk_id.to_string(), data_dir).await?;
+        anyhow::ensure!(ChunkId::of(&data) == *chunk_id, "bloc {chunk_id} corrompu");
+        hasher.update(&data);
+        size += data.len() as u64;
+        file.write_all(&data)?;
+    }
+    let checksum: [u8; 32] = hasher.finalize().into();
+    anyhow::ensure!(size == manifest.size && checksum == manifest.checksum, "le fichier reconstitué ne correspond pas à son manifeste");
     Ok(())
 }
 

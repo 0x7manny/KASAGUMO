@@ -478,3 +478,22 @@ fn les_blocs_sont_re_repliques_quand_un_noeud_tombe() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn put_d_un_fichier_introuvable_echoue_proprement() {
+    let dir = std::env::temp_dir().join(format!("kgo-put-missing-{}", std::process::id()));
+    let daemon = Daemon::start(&dir);
+
+    let out = daemon.kgo(&["put", "/inexistant/fichier.bin"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("impossible de lire"), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).is_empty());
+
+    // un get qui échoue ne laisse pas de fichier
+    let target = dir.join("sortie.bin");
+    assert_eq!(daemon.kgo(&["get", &"0".repeat(64), target.to_str().unwrap()]).status.code(), Some(1));
+    assert!(!target.exists());
+
+    daemon.stop();
+    std::fs::remove_dir_all(&dir).ok();
+}
