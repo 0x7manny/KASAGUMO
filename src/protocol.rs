@@ -56,8 +56,13 @@ pub enum Request {
     Info,
     AddPeer { addr: String },
     Nodes,
-    /// Battement de cœur d'un pair : annonce son port d'écoute, reçoit les pairs connus.
-    Hello { port: u16 },
+    /// Battement de cœur d'un pair : annonce son port d'écoute et les workloads qu'il héberge,
+    /// reçoit les pairs connus.
+    Hello { port: u16, workloads: Vec<(String, WorkloadSpec)> },
+    /// Workloads d'un pair tombé que l'expéditeur connaît : au chef de les relancer.
+    Adopt { dead: String, workloads: Vec<(String, WorkloadSpec)> },
+    /// Ces workloads ont été relancés ailleurs : à ne plus relancer.
+    Forget { ids: Vec<String> },
     /// Fait exécuter la requête par un pair (le nœud local s'authentifie pour le CLI).
     Forward { addr: String, request: Box<Request> },
 }

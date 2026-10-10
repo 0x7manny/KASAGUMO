@@ -27,7 +27,7 @@ It describes a cloud that forms like a hat over **Mount Fuji**.
 kgo node start --port 7070 --token <secret>   # or KGO_TOKEN
 
 # Add a peer to this node (peers then discover each other by heartbeat;
-# workloads of a peer that goes down are rescheduled elsewhere)
+# workloads of a node that goes down, whoever started them, are rescheduled elsewhere)
 kgo node join 192.168.1.10:7070
 
 # List available nodes

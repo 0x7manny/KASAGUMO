@@ -43,7 +43,7 @@ impl fmt::Display for WorkloadState {
     }
 }
 
-/// Un workload que ce nœud a confié à un pair, pour le relancer ailleurs si le pair tombe.
+/// Un workload hébergé par un pair (confié par ce nœud ou annoncé par le pair), pour le relancer ailleurs si le pair tombe.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Placement {
     pub addr: String,

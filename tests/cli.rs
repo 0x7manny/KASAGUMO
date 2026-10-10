@@ -497,3 +497,30 @@ fn put_d_un_fichier_introuvable_echoue_proprement() {
     daemon.stop();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn les_workloads_d_un_noeud_tombe_sont_repris_une_seule_fois() {
+    let base = std::env::temp_dir().join(format!("kgo-takeover-{}", std::process::id()));
+    let mut nodes = vec![Daemon::start(&base.join("a")), Daemon::start(&base.join("b")), Daemon::start(&base.join("c"))];
+    let addr = |d: &Daemon| format!("127.0.0.1:{}", d.port);
+    for peer in [1, 2] {
+        assert!(nodes[0].kgo(&["node", "join", &addr(&nodes[peer])]).status.success());
+    }
+    wait_until("le cluster ne se connaît pas", || {
+        nodes.iter().all(|n| text(&n.kgo(&["nodes"]).stdout).matches(" up").count() == 3)
+    });
+
+    // le workload tourne sur a, qui l'a lancé lui-même ; b et c l'apprennent par ses battements
+    let placed = text(&nodes[0].kgo(&["run", "nginx"]).stdout);
+    assert!(placed.contains("localhost"), "{placed}");
+    std::thread::sleep(std::time::Duration::from_millis(700));
+
+    // a tombe avec son workload : un seul des deux survivants le reprend
+    nodes.remove(0).stop();
+    let running = |nodes: &[Daemon]| nodes.iter().filter(|n| text(&n.kgo(&["ps"]).stdout).contains("nginx")).count();
+    wait_until("le workload n'a pas été repris", || running(&nodes) >= 1);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(running(&nodes), 1);
+
+    std::fs::remove_dir_all(&base).ok();
+}

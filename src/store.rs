@@ -131,6 +131,30 @@ impl Store {
         Ok(())
     }
 
+    /// Remplace ce que `addr` a annoncé héberger.
+    pub fn set_hosted(&self, addr: &str, workloads: Vec<(String, WorkloadSpec)>) -> anyhow::Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(PLACEMENTS)?;
+            let mut stale = Vec::new();
+            for entry in table.iter()? {
+                let (id, value) = entry?;
+                if serde_json::from_slice::<Placement>(value.value())?.addr == addr {
+                    stale.push(id.value().to_string());
+                }
+            }
+            for id in stale {
+                table.remove(id.as_str())?;
+            }
+            for (id, spec) in workloads {
+                let placement = Placement { addr: addr.to_string(), spec };
+                table.insert(id.as_str(), serde_json::to_vec(&placement)?.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn placement(&self, id: &str) -> anyhow::Result<Option<Placement>> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(PLACEMENTS)?;

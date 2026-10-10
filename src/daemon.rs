@@ -198,19 +198,27 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
         Request::Fetch { id } => node.blobs.get(&id).map(|data| Response::Blob(data.map(|d| blobs::encode(&d)))),
         Request::Put { data } => put(node, &data).await,
         Request::Get { id } => get(node, &id).await,
-        Request::Hello { port } => match origin {
-            Origin::Peer(ip) => store
-                .add_peer(&SocketAddr::new(ip, port).to_string())
-                .and_then(|()| store.peers())
-                .map(Response::Peers),
+        Request::Hello { port, workloads } => match origin {
+            Origin::Peer(ip) => {
+                let addr = SocketAddr::new(ip, port).to_string();
+                store.add_peer(&addr).and_then(|()| store.set_hosted(&addr, workloads)).and_then(|()| store.peers()).map(Response::Peers)
+            }
             _ => Err(anyhow::anyhow!("réservé aux pairs")),
         },
+        Request::Adopt { dead, workloads } => takeover(node, &dead, workloads).await.map(|()| Response::Stopped),
+        Request::Forget { ids } => ids.iter().try_for_each(|id| store.unplace(id)).map(|()| Response::Stopped),
         Request::Forward { addr, request } => forward(node, &addr, &request).await,
     };
     result.unwrap_or_else(|e| Response::Error(format!("{e:#}")))
 }
 
 impl Node {
+    /// Les workloads actifs de ce nœud, tels qu'on les annonce aux pairs.
+    fn hosted(&self) -> anyhow::Result<Vec<(String, WorkloadSpec)>> {
+        let workloads = self.store.list()?;
+        Ok(workloads.into_iter().filter(|w| w.state.is_active()).map(|w| (w.id, w.spec)).collect())
+    }
+
     /// Les infos du nœud, avec les ressources réservées à cet instant.
     fn current_info(&self) -> anyhow::Result<NodeInfo> {
         let mut info = self.info.clone();
@@ -385,7 +393,7 @@ async fn heartbeat(
     let mut probes = JoinSet::new();
     for addr in node.store.peers()?.into_iter().filter(|a| !own.contains(a)) {
         let token = token.clone();
-        let hello = Request::Hello { port: node.info.port };
+        let hello = Request::Hello { port: node.info.port, workloads: node.hosted()? };
         probes.spawn(async move { (client::send_to_peer(&addr, &token, &hello).await, addr) });
     }
     while let Some(probe) = probes.join_next().await {
@@ -422,17 +430,50 @@ async fn learn(node: &Node, addr: String, own: &mut HashSet<String>) -> anyhow::
     Ok(())
 }
 
-/// Replace ailleurs les workloads confiés à un pair tombé ; réessayé tant qu'il en reste.
+/// Un pair est tombé : ses workloads (lancés par lui ou par un autre) sont relancés ailleurs par le nœud
+/// vivant au plus petit id. Les autres lui transmettent ce qu'ils en savent ; réessayé tant qu'il en reste.
 async fn failover(node: &Node, dead: &str) -> anyhow::Result<()> {
-    for (id, placement) in node.store.placements()?.into_iter().filter(|(_, p)| p.addr == dead) {
-        match schedule(node, placement.spec).await? {
-            Response::Placed { addr, workload } => {
-                eprintln!("workload {id} : {dead} est tombé, relancé sur {addr} ({})", workload.id);
-                node.store.unplace(&id)?;
-                node.store.orphan(&id, dead)?;
+    let lost: Vec<_> = node.store.placements()?.into_iter().filter(|(_, p)| p.addr == dead).map(|(id, p)| (id, p.spec)).collect();
+    if lost.is_empty() {
+        return Ok(());
+    }
+    let alive = nodes(node).await?.into_iter().filter_map(|n| Some((n.addr, n.info.ok()?)));
+    let Some((leader_addr, leader)) = alive.min_by(|a, b| a.1.id.cmp(&b.1.id)) else {
+        return Ok(());
+    };
+    if leader.id == node.info.id {
+        return takeover(node, dead, lost).await;
+    }
+    let token = node.token.as_deref().unwrap_or_default();
+    let adopt = Request::Adopt { dead: dead.to_string(), workloads: lost };
+    client::send_to_peer(&leader_addr, token, &adopt).await.ok();
+    Ok(())
+}
+
+/// Relance `lost` (workloads de `dead`) puis prévient les pairs ; ceux déjà relancés ne le sont pas deux fois.
+async fn takeover(node: &Node, dead: &str, lost: Vec<(String, WorkloadSpec)>) -> anyhow::Result<()> {
+    let done: HashSet<_> = node.store.orphans()?.into_iter().map(|(id, _)| id).collect();
+    let mut moved = Vec::new();
+    for (id, spec) in lost {
+        if !done.contains(&id) {
+            match schedule(node, spec).await? {
+                Response::Placed { addr, workload } => {
+                    eprintln!("workload {id} : {dead} est tombé, relancé sur {addr} ({})", workload.id);
+                    node.store.orphan(&id, dead)?;
+                }
+                other => {
+                    eprintln!("workload {id} : replacement impossible ({other:?})");
+                    continue;
+                }
             }
-            other => eprintln!("workload {id} : replacement impossible ({other:?})"),
         }
+        node.store.unplace(&id)?;
+        moved.push(id);
+    }
+
+    let token = node.token.as_deref().unwrap_or_default();
+    for peer in node.store.peers()? {
+        client::send_to_peer(&peer, token, &Request::Forget { ids: moved.clone() }).await.ok();
     }
     Ok(())
 }
