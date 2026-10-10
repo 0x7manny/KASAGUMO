@@ -45,6 +45,8 @@ pub enum Request {
     Logs { id: String },
     /// Range un bloc (hex) sur ce nœud.
     Store { data: String },
+    /// Parmi ces blocs, lesquels manquent à ce nœud ?
+    Missing { ids: Vec<String> },
     /// Demande un bloc à ce nœud.
     Fetch { id: String },
     /// Répartit un bloc (hex) sur `REPLICAS` nœuds du cluster (réservé au CLI local).
@@ -69,6 +71,7 @@ pub enum Response {
     Logs(String),
     Stored { id: String, copies: usize },
     Blob(Option<String>),
+    Ids(Vec<String>),
     Info(NodeInfo),
     PeerAdded,
     Peers(Vec<String>),

@@ -446,3 +446,35 @@ fn put_et_get_repartis_sur_le_cluster() {
     b.stop();
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// Les blocs rangés sur un nœud (un fichier par bloc dans `<dossier>/blobs`).
+fn blobs_of(daemon: &Daemon) -> std::collections::BTreeSet<String> {
+    let entries = std::fs::read_dir(daemon.dir.join("blobs")).unwrap();
+    entries.map(|e| e.unwrap().file_name().into_string().unwrap()).collect()
+}
+
+#[test]
+fn les_blocs_sont_re_repliques_quand_un_noeud_tombe() {
+    let base = std::env::temp_dir().join(format!("kgo-repair-{}", std::process::id()));
+    let mut nodes = vec![Daemon::start(&base.join("a")), Daemon::start(&base.join("b")), Daemon::start(&base.join("c"))];
+    let addr = |d: &Daemon| format!("127.0.0.1:{}", d.port);
+    for peer in [1, 2] {
+        assert!(nodes[0].kgo(&["node", "join", &addr(&nodes[peer])]).status.success());
+    }
+    wait_until("le cluster ne se connaît pas", || {
+        nodes.iter().all(|n| text(&n.kgo(&["nodes"]).stdout).matches(" up").count() == 3)
+    });
+
+    std::fs::create_dir_all(&base).unwrap();
+    let input = base.join("in.bin");
+    std::fs::write(&input, vec![7u8; 2_500_000]).unwrap();
+    let out = nodes[0].kgo(&["put", input.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let all: std::collections::BTreeSet<String> = nodes.iter().flat_map(blobs_of).collect();
+
+    // c tombe : a et b, qui se partageaient les copies, doivent tout détenir
+    nodes.remove(2).stop();
+    wait_until("les copies n'ont pas été refaites", || nodes.iter().all(|n| blobs_of(n) == all));
+
+    std::fs::remove_dir_all(&base).ok();
+}

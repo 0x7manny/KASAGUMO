@@ -21,6 +21,12 @@ impl Blobs {
         Ok(id)
     }
 
+    /// Les blocs présents sur ce nœud.
+    pub fn ids(&self) -> anyhow::Result<Vec<String>> {
+        let names = std::fs::read_dir(&self.0)?.filter_map(|e| e.ok()?.file_name().into_string().ok());
+        Ok(names.filter(|name| is_id(name)).collect())
+    }
+
     /// `None` si le bloc est absent ou corrompu.
     pub fn get(&self, id: &str) -> anyhow::Result<Option<Vec<u8>>> {
         anyhow::ensure!(is_id(id), "identifiant invalide : {id}");

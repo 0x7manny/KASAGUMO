@@ -190,6 +190,11 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
         Request::Store { data } => blobs::decode(&data)
             .and_then(|data| node.blobs.put(&data))
             .map(|id| Response::Stored { id, copies: 1 }),
+        Request::Missing { ids } => ids
+            .into_iter()
+            .filter_map(|id| node.blobs.get(&id).map(|blob| blob.is_none().then_some(id)).transpose())
+            .collect::<anyhow::Result<_>>()
+            .map(Response::Ids),
         Request::Fetch { id } => node.blobs.get(&id).map(|data| Response::Blob(data.map(|d| blobs::encode(&d)))),
         Request::Put { data } => put(node, &data).await,
         Request::Get { id } => get(node, &id).await,
@@ -351,14 +356,21 @@ async fn reconcile(node: &Node) -> anyhow::Result<()> {
 /// Battements de cœur : les pairs apprennent notre adresse et se transmettent leurs pairs ;
 /// un pair muet depuis `DEAD_AFTER` battements est déclaré tombé et ses workloads sont replacés.
 const DEAD_AFTER: u32 = 3;
+/// La réparation des blocs passe tous les `REPAIR_EVERY` battements.
+const REPAIR_EVERY: u32 = 10;
 
 async fn monitor(node: Arc<Node>, interval: Duration) {
     let mut misses = HashMap::new();
     let mut own = HashSet::new();
-    loop {
+    for tick in 1u32.. {
         tokio::time::sleep(interval).await;
         if let Err(e) = heartbeat(&node, &mut misses, &mut own).await {
             eprintln!("battement de cœur en erreur : {e:#}");
+        }
+        if tick % REPAIR_EVERY == 0 {
+            if let Err(e) = repair(&node).await {
+                eprintln!("réparation des blocs en erreur : {e:#}");
+            }
         }
     }
 }
@@ -449,13 +461,20 @@ async fn total_memory() -> Option<u64> {
 /// Nombre de copies de chaque bloc.
 const REPLICAS: usize = 2;
 
+/// Les nœuds joignables, classés par le hachage (id du bloc, id du nœud) : les `REPLICAS` premiers
+/// doivent détenir le bloc.
+async fn ranked_nodes(node: &Node, id: &str) -> anyhow::Result<Vec<(String, NodeInfo)>> {
+    let mut ranked: Vec<_> = nodes(node).await?.into_iter().filter_map(|n| Some((n.addr, n.info.ok()?))).collect();
+    ranked.sort_by_cached_key(|(_, info)| Sha256::digest(format!("{id}{}", info.id)));
+    Ok(ranked)
+}
+
 /// Range le bloc sur les `REPLICAS` nœuds que le hachage (id du bloc, id du nœud) classe en tête ;
 /// un nœud injoignable est remplacé par le suivant du classement.
 async fn put(node: &Node, hex: &str) -> anyhow::Result<Response> {
     let data = blobs::decode(hex)?;
     let id = kasagumo::ChunkId::of(&data).to_string();
-    let mut ranked: Vec<_> = nodes(node).await?.into_iter().filter_map(|n| Some((n.addr, n.info.ok()?))).collect();
-    ranked.sort_by_cached_key(|(_, info)| Sha256::digest(format!("{id}{}", info.id)));
+    let ranked = ranked_nodes(node, &id).await?;
 
     let token = node.token.as_deref().unwrap_or_default();
     let mut copies = 0;
@@ -490,4 +509,30 @@ async fn get(node: &Node, id: &str) -> anyhow::Result<Response> {
         }
     }
     anyhow::bail!("bloc introuvable dans le cluster : {id}")
+}
+
+/// Remet chaque bloc local sur les nœuds qui doivent le détenir (après la chute d'un nœud ou l'arrivée d'un autre).
+async fn repair(node: &Node) -> anyhow::Result<()> {
+    let mut wanted: HashMap<String, Vec<String>> = HashMap::new();
+    for id in node.blobs.ids()? {
+        for (addr, info) in ranked_nodes(node, &id).await?.into_iter().take(REPLICAS) {
+            if info.id != node.info.id {
+                wanted.entry(addr).or_default().push(id.clone());
+            }
+        }
+    }
+
+    let token = node.token.as_deref().unwrap_or_default();
+    for (addr, ids) in wanted {
+        let Ok(Response::Ids(missing)) = client::send_to_peer(&addr, token, &Request::Missing { ids }).await else {
+            continue;
+        };
+        for id in missing {
+            if let Some(data) = node.blobs.get(&id)? {
+                let store = Request::Store { data: blobs::encode(&data) };
+                client::send_to_peer(&addr, token, &store).await.ok();
+            }
+        }
+    }
+    Ok(())
 }
