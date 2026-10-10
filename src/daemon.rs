@@ -30,6 +30,8 @@ struct Node {
     runtime: DockerRuntime,
     info: NodeInfo,
     identity: Identity,
+    /// Une seule reprise à la fois : sinon la surveillance et une requête `Adopt` relancent chacune le même workload.
+    takeover: tokio::sync::Mutex<()>,
     tls: TlsAcceptor,
     blobs: Blobs,
 }
@@ -76,7 +78,7 @@ pub async fn serve(data_dir: &Path, port: u16, heartbeat: Duration) -> anyhow::R
         used_cpus: 0,
         used_memory: 0,
     };
-    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, identity, tls: secure::acceptor()?, blobs: Blobs::open(data_dir.join("blobs"))? });
+    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, identity, takeover: Default::default(), tls: secure::acceptor()?, blobs: Blobs::open(data_dir.join("blobs"))? });
     reconcile(&node).await?;
     tokio::spawn(monitor(Arc::clone(&node), heartbeat));
     println!("nœud {} démarré", node.info.id);
@@ -453,6 +455,7 @@ async fn failover(node: &Node, dead: &str) -> anyhow::Result<()> {
 
 /// Relance `lost` (workloads de `dead`) puis prévient les pairs ; ceux déjà relancés ne le sont pas deux fois.
 async fn takeover(node: &Node, dead: &str, lost: Vec<(String, WorkloadSpec)>) -> anyhow::Result<()> {
+    let _one_at_a_time = node.takeover.lock().await;
     let done: HashSet<_> = node.store.orphans()?.into_iter().map(|(id, _)| id).collect();
     let mut moved = Vec::new();
     for (id, spec) in lost {
