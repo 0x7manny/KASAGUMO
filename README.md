@@ -6,13 +6,21 @@
   A decentralized cloud built in Rust.
 </p>
 
+<p align="center">
+  <a href="https://github.com/0x7manny/KASAGUMO/actions/workflows/ci.yml"><img src="https://github.com/0x7manny/KASAGUMO/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
 ---
 
 ## About
 
 **Kasagumo** is a decentralized cloud where machines can share their computing resources.
 
-Built with **Rust**.
+- **Run** containers on the node with the most free CPU and memory.
+- **Store** files as blocks copied on several nodes.
+- **Recover** on its own: when a node goes down, its workloads and blocks move to the others.
+
+Nodes talk to each other over TLS and share a secret token. Built with **Rust**.
 
 ## Name
 
@@ -20,37 +28,50 @@ Built with **Rust**.
 
 It describes a cloud that forms like a hat over **Mount Fuji**.
 
+## Quick start
+
+You need [Rust](https://rustup.rs) and [Docker](https://www.docker.com).
+
+```bash
+cargo install --path .
+
+# On every machine, with the same token
+kgo node start --port 7070 --token <secret>
+
+# On one machine: join the others (they find each other by themselves)
+kgo node join 192.168.1.10:7070
+
+# Run a workload: it is placed on the best node
+kgo run nginx:latest
+kgo nodes
+```
+
+The token can also be set with `KGO_TOKEN`.
+
 ## Commands
 
 ```bash
-# Start a node (Unix socket for the CLI, TCP port for peers)
-kgo node start --port 7070 --token <secret>   # or KGO_TOKEN
+kgo node start --port 7070 --token <secret>   # start a node
+kgo node join <addr>                          # add a peer
+kgo nodes                                     # list nodes, free CPU and memory
 
-# Add a peer to this node (peers then discover each other by heartbeat;
-# workloads of a node that goes down, whoever started them, are rescheduled elsewhere)
-kgo node join 192.168.1.10:7070
+kgo run --cpu 2 --memory 4GB nginx:latest     # run a workload
+kgo run -p 8080:80 -e MODE=prod nginx:latest  # publish a port, set a variable
+kgo --on <addr> run nginx:latest              # run on a given node (also ps)
 
-# List available nodes
-kgo nodes
+kgo ps [--all]                                # list workloads
+kgo logs <workload-id>                        # show its output
+kgo stop <workload-id>                        # stop it
 
-# Run a workload (placed on the node with the most free CPUs)
-kgo run --cpu 2 --memory 4GB nginx:latest
+kgo put ./photo.jpg                           # store a file, prints its id
+kgo get <file-id> ./photo-copy.jpg            # get it back
+```
 
-# Publish a port and set environment variables
-kgo run -p 8080:80 -e MODE=prod nginx:latest
+## Development
 
-# Run on a peer (same token on both nodes)
-kgo --on 192.168.1.10:7070 run nginx:latest
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
 
-# List running workloads (also --on)
-kgo ps
-
-# Show the output of a workload (stop and logs find the hosting node by themselves)
-kgo logs <workload-id>
-
-# Store a file on the cluster (2 copies per block) and get it back by its id
-kgo put ./photo.jpg
-kgo get <file-id> ./photo-copy.jpg
-
-# Stop a workload
-kgo stop <workload-id>
+Tests start real nodes on your machine and replace Docker with a fake one, so they run without Docker.
