@@ -36,6 +36,9 @@ kgo nodes
 # Run a workload (placed on the node with the most free CPUs)
 kgo run --cpu 2 --memory 4GB nginx:latest
 
+# Publish a port and set environment variables
+kgo run -p 8080:80 -e MODE=prod nginx:latest
+
 # Run on a peer (same token on both nodes)
 kgo --on 192.168.1.10:7070 run nginx:latest
 
