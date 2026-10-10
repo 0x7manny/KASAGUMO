@@ -370,12 +370,14 @@ const REPAIR_EVERY: u32 = 10;
 async fn monitor(node: Arc<Node>, interval: Duration) {
     let mut misses = HashMap::new();
     let mut own = HashSet::new();
-    for tick in 1u32.. {
+    let mut tick = 0u32;
+    loop {
         tokio::time::sleep(interval).await;
+        tick = tick.wrapping_add(1);
         if let Err(e) = heartbeat(&node, &mut misses, &mut own).await {
             eprintln!("battement de cœur en erreur : {e:#}");
         }
-        if tick % REPAIR_EVERY == 0
+        if tick.is_multiple_of(REPAIR_EVERY)
             && let Err(e) = repair(&node).await {
                 eprintln!("réparation des blocs en erreur : {e:#}");
             }
