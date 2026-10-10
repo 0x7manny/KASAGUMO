@@ -21,7 +21,5 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: clippy
-        run: |
-          cargo clippy --color never --all-targets -- -D warnings > clippy.txt 2>&1 || { rustc --version; echo "::error::$(grep -E '^(error|warning)' -A8 clippy.txt | head -c 5000 | awk 'BEGIN{ORS="%0A"} {print}')"; tail -5 clippy.txt; exit 1; }
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
