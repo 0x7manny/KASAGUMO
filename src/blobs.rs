@@ -48,7 +48,7 @@ pub fn encode(data: &[u8]) -> String {
 }
 
 pub fn decode(hex: &str) -> anyhow::Result<Vec<u8>> {
-    anyhow::ensure!(hex.is_ascii() && hex.len() % 2 == 0, "hexadécimal invalide");
+    anyhow::ensure!(hex.is_ascii() && hex.len().is_multiple_of(2), "hexadécimal invalide");
     (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).context("hexadécimal invalide"))

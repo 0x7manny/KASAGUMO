@@ -167,12 +167,11 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
     }
     let store = &node.store;
     // un workload confié à un pair se pilote là où il tourne
-    if let Request::Stop { id } | Request::Logs { id } = &request {
-        if let Ok(Some(placement)) = store.placement(id) {
+    if let Request::Stop { id } | Request::Logs { id } = &request
+        && let Ok(Some(placement)) = store.placement(id) {
             let response = forward(node, &placement.addr, &request).await;
             return response.unwrap_or_else(|e| Response::Error(format!("{e:#}")));
         }
-    }
     let result = match request {
         Request::AddPeer { addr } => store.add_peer(&addr).map(|()| Response::PeerAdded),
         Request::Nodes => nodes(node).await.map(Response::Nodes),
@@ -375,11 +374,10 @@ async fn monitor(node: Arc<Node>, interval: Duration) {
         if let Err(e) = heartbeat(&node, &mut misses, &mut own).await {
             eprintln!("battement de cœur en erreur : {e:#}");
         }
-        if tick % REPAIR_EVERY == 0 {
-            if let Err(e) = repair(&node).await {
+        if tick % REPAIR_EVERY == 0
+            && let Err(e) = repair(&node).await {
                 eprintln!("réparation des blocs en erreur : {e:#}");
             }
-        }
     }
 }
 
@@ -543,11 +541,10 @@ async fn get(node: &Node, id: &str) -> anyhow::Result<Response> {
     let token = node.token.as_deref().unwrap_or_default();
     for addr in node.store.peers()? {
         let fetch = Request::Fetch { id: id.to_string() };
-        if let Ok(Response::Blob(Some(hex))) = client::send_to_peer(&addr, token, &fetch).await {
-            if blobs::decode(&hex).is_ok_and(|data| kasagumo::ChunkId::of(&data).to_string() == id) {
+        if let Ok(Response::Blob(Some(hex))) = client::send_to_peer(&addr, token, &fetch).await
+            && blobs::decode(&hex).is_ok_and(|data| kasagumo::ChunkId::of(&data).to_string() == id) {
                 return Ok(Response::Blob(Some(hex)));
             }
-        }
     }
     anyhow::bail!("bloc introuvable dans le cluster : {id}")
 }
