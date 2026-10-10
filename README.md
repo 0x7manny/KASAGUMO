@@ -20,7 +20,7 @@
 - **Store** files as blocks copied on several nodes.
 - **Recover** on its own: when a node goes down, its workloads and blocks move to the others.
 
-Nodes talk to each other over TLS and share a secret token. Built with **Rust**.
+Every node has its own key. Nodes talk over TLS and only accept members of their cluster. Built with **Rust**.
 
 ## Name
 
@@ -35,23 +35,30 @@ You need [Rust](https://rustup.rs) and [Docker](https://www.docker.com).
 ```bash
 cargo install --path .
 
-# On every machine, with the same token
-kgo node start --port 7070 --token <secret>
+# First machine: create the cluster, start a node
+kgo cluster init
+kgo node start --port 7070
 
-# On one machine: join the others (they find each other by themselves)
-kgo node join 192.168.1.10:7070
+# Every other machine: get admitted by the first one
+kgo node id                       # prints this machine's public key
+kgo cluster admit <public-key>    # on the first machine: prints a certificate
+kgo node enroll <certificate>     # back on this machine
+kgo node start --port 7070
+kgo node join 192.168.1.10:7070   # nodes then find each other by themselves
 
 # Run a workload: it is placed on the best node
 kgo run nginx:latest
 kgo nodes
 ```
 
-The token can also be set with `KGO_TOKEN`.
-
 ## Commands
 
 ```bash
-kgo node start --port 7070 --token <secret>   # start a node
+kgo cluster init                              # create a cluster (first node)
+kgo cluster admit <public-key>                # admit a node (where you ran init)
+kgo node id                                   # show this node's public key
+kgo node enroll <certificate>                 # join a cluster
+kgo node start --port 7070                    # start a node
 kgo node join <addr>                          # add a peer
 kgo nodes                                     # list nodes, free CPU and memory
 
