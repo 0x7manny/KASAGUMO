@@ -22,6 +22,4 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
-      - name: test
-        run: |
-          cargo test --color never > test.txt 2>&1 || { echo "::error::$(grep -E 'FAILED|panicked|failed' -B1 -A5 test.txt | head -c 6000 | awk 'BEGIN{ORS="%0A"} {print}')"; exit 1; }
+      - run: cargo test
