@@ -14,6 +14,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::blobs::{self, Blobs};
 use crate::client;
+use crate::identity::Identity;
 use crate::protocol::{NodeInfo, NodeStatus, Request, Response};
 use crate::runtime::DockerRuntime;
 use crate::secure::{self, SessionKey};
@@ -28,13 +29,13 @@ struct Node {
     store: Arc<Store>,
     runtime: DockerRuntime,
     info: NodeInfo,
-    token: Option<String>,
+    identity: Identity,
     tls: TlsAcceptor,
     blobs: Blobs,
 }
 
 /// Origine d'une connexion : le socket Unix est de confiance ; sur le port TCP,
-/// seul un pair qui présente le token du cluster l'est, les autres ne peuvent
+/// seul un membre du cluster (prouvé par `identity.rs`) l'est, les autres ne peuvent
 /// que demander `Info`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Origin {
@@ -43,7 +44,7 @@ enum Origin {
     Anonymous,
 }
 
-pub async fn serve(data_dir: &Path, port: u16, token: Option<String>, heartbeat: Duration) -> anyhow::Result<()> {
+pub async fn serve(data_dir: &Path, port: u16, heartbeat: Duration) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("impossible de créer {}", data_dir.display()))?;
     let data_dir = std::fs::canonicalize(data_dir)?;
@@ -56,6 +57,7 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>, heartbeat:
         std::fs::remove_file(&path).context("impossible de supprimer l'ancien socket")?;
     }
 
+    let identity = Identity::load(&data_dir)?;
     let store = Store::open(&data_dir.join("state.redb"))?;
 
     let tcp = TcpListener::bind(("0.0.0.0", port))
@@ -66,7 +68,7 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>, heartbeat:
         .with_context(|| format!("impossible d'ouvrir le socket {}", path.display()))?;
 
     let info = NodeInfo {
-        id: store.node_id()?,
+        id: identity.node_id(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
         memory: total_memory().await.unwrap_or(u64::MAX), // inconnue : pas de limite
@@ -74,7 +76,7 @@ pub async fn serve(data_dir: &Path, port: u16, token: Option<String>, heartbeat:
         used_cpus: 0,
         used_memory: 0,
     };
-    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, token, tls: secure::acceptor()?, blobs: Blobs::open(data_dir.join("blobs"))? });
+    let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, identity, tls: secure::acceptor()?, blobs: Blobs::open(data_dir.join("blobs"))? });
     reconcile(&node).await?;
     tokio::spawn(monitor(Arc::clone(&node), heartbeat));
     println!("nœud {} démarré", node.info.id);
@@ -125,15 +127,14 @@ where
     let mut writer = Box::pin(writer);
     let mut lines = BufReader::new(reader).lines();
 
-    // sur TCP, le pair ouvre par sa preuve du token, à quoi le nœud répond par la sienne
+    // sur TCP, le pair ouvre par sa preuve d'identité, à quoi le nœud répond par la sienne
     let origin = match link {
         None => Origin::Local,
         Some((key, ip)) => {
             let sent = lines.next_line().await?.unwrap_or_default();
-            let token = node.token.as_deref().unwrap_or_default();
-            writer.write_all(format!("{}\n", secure::proof(token, &key, "server")).as_bytes()).await?;
+            writer.write_all(format!("{}\n", node.identity.handshake("server", &key)).as_bytes()).await?;
             writer.flush().await?;
-            if !token.is_empty() && secure::same(&sent, &secure::proof(token, &key, "client")) {
+            if node.identity.verify(&sent, "client", &key).is_some() {
                 Origin::Peer(ip)
             } else {
                 Origin::Anonymous
@@ -163,7 +164,7 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
         Origin::Anonymous => matches!(request, Request::Info),
     };
     if !allowed {
-        return Response::Error("requête refusée : token du cluster manquant ou invalide".to_string());
+        return Response::Error("requête refusée : ce nœud n'est pas membre du cluster".to_string());
     }
     let store = &node.store;
     // un workload confié à un pair se pilote là où il tourne
@@ -269,7 +270,7 @@ async fn schedule(node: &Node, spec: WorkloadSpec) -> anyhow::Result<Response> {
 }
 
 async fn forward(node: &Node, addr: &str, request: &Request) -> anyhow::Result<Response> {
-    let response = client::send_to_peer(addr, node.token.as_deref().unwrap_or_default(), request).await?;
+    let response = client::send_to_peer(addr, Some(&node.identity), request).await?;
     if let (Request::Stop { id }, Response::Stopped) = (request, &response) {
         node.store.unplace(id)?; // arrêté volontairement : à ne pas relancer ailleurs
     }
@@ -280,9 +281,9 @@ async fn forward(node: &Node, addr: &str, request: &Request) -> anyhow::Result<R
 async fn nodes(node: &Node) -> anyhow::Result<Vec<NodeStatus>> {
     let mut queries = JoinSet::new();
     for addr in node.store.peers()? {
-        let token = node.token.clone().unwrap_or_default();
+        let identity = node.identity.clone();
         queries.spawn(async move {
-            let info = match client::send_to_peer(&addr, &token, &Request::Info).await {
+            let info = match client::send_to_peer(&addr, Some(&identity), &Request::Info).await {
                 Ok(Response::Info(info)) => Ok(info),
                 Ok(Response::Error(e)) => Err(e),
                 Ok(other) => Err(format!("réponse inattendue : {other:?}")),
@@ -387,12 +388,12 @@ async fn heartbeat(
     misses: &mut HashMap<String, u32>,
     own: &mut HashSet<String>,
 ) -> anyhow::Result<()> {
-    let token = node.token.clone().unwrap_or_default();
+    let identity = node.identity.clone();
     let mut probes = JoinSet::new();
     for addr in node.store.peers()?.into_iter().filter(|a| !own.contains(a)) {
-        let token = token.clone();
+        let identity = identity.clone();
         let hello = Request::Hello { port: node.info.port, workloads: node.hosted()? };
-        probes.spawn(async move { (client::send_to_peer(&addr, &token, &hello).await, addr) });
+        probes.spawn(async move { (client::send_to_peer(&addr, Some(&identity), &hello).await, addr) });
     }
     while let Some(probe) = probes.join_next().await {
         match probe? {
@@ -417,8 +418,8 @@ async fn learn(node: &Node, addr: String, own: &mut HashSet<String>) -> anyhow::
     if own.contains(&addr) || node.store.peers()?.contains(&addr) {
         return Ok(());
     }
-    let token = node.token.as_deref().unwrap_or_default();
-    match client::send_to_peer(&addr, token, &Request::Info).await {
+    let identity = Some(&node.identity);
+    match client::send_to_peer(&addr, identity, &Request::Info).await {
         Ok(Response::Info(info)) if info.id == node.info.id => {
             own.insert(addr);
         }
@@ -442,9 +443,9 @@ async fn failover(node: &Node, dead: &str) -> anyhow::Result<()> {
     if leader.id == node.info.id {
         return takeover(node, dead, lost).await;
     }
-    let token = node.token.as_deref().unwrap_or_default();
+    let identity = Some(&node.identity);
     let adopt = Request::Adopt { dead: dead.to_string(), workloads: lost };
-    client::send_to_peer(&leader_addr, token, &adopt).await.ok();
+    client::send_to_peer(&leader_addr, identity, &adopt).await.ok();
     Ok(())
 }
 
@@ -469,18 +470,18 @@ async fn takeover(node: &Node, dead: &str, lost: Vec<(String, WorkloadSpec)>) ->
         moved.push(id);
     }
 
-    let token = node.token.as_deref().unwrap_or_default();
+    let identity = Some(&node.identity);
     for peer in node.store.peers()? {
-        client::send_to_peer(&peer, token, &Request::Forget { ids: moved.clone() }).await.ok();
+        client::send_to_peer(&peer, identity, &Request::Forget { ids: moved.clone() }).await.ok();
     }
     Ok(())
 }
 
 /// Un pair revenu d'entre les morts : arrête les copies de workloads qu'on a relancés ailleurs.
 async fn release_orphans(node: &Node, addr: &str) -> anyhow::Result<()> {
-    let token = node.token.as_deref().unwrap_or_default();
+    let identity = Some(&node.identity);
     for (id, _) in node.store.orphans()?.into_iter().filter(|(_, at)| at == addr) {
-        if client::send_to_peer(addr, token, &Request::Stop { id: id.clone() }).await.is_ok() {
+        if client::send_to_peer(addr, identity, &Request::Stop { id: id.clone() }).await.is_ok() {
             node.store.forget_orphan(&id)?;
         }
     }
@@ -515,7 +516,7 @@ async fn put(node: &Node, hex: &str) -> anyhow::Result<Response> {
     let id = kasagumo::ChunkId::of(&data).to_string();
     let ranked = ranked_nodes(node, &id).await?;
 
-    let token = node.token.as_deref().unwrap_or_default();
+    let identity = Some(&node.identity);
     let mut copies = 0;
     for (addr, info) in ranked {
         if copies == REPLICAS {
@@ -525,7 +526,7 @@ async fn put(node: &Node, hex: &str) -> anyhow::Result<Response> {
             node.blobs.put(&data).is_ok()
         } else {
             let store = Request::Store { data: hex.to_string() };
-            matches!(client::send_to_peer(&addr, token, &store).await, Ok(Response::Stored { .. }))
+            matches!(client::send_to_peer(&addr, identity, &store).await, Ok(Response::Stored { .. }))
         };
         copies += usize::from(stored);
     }
@@ -538,10 +539,10 @@ async fn get(node: &Node, id: &str) -> anyhow::Result<Response> {
     if let Some(data) = node.blobs.get(id)? {
         return Ok(Response::Blob(Some(blobs::encode(&data))));
     }
-    let token = node.token.as_deref().unwrap_or_default();
+    let identity = Some(&node.identity);
     for addr in node.store.peers()? {
         let fetch = Request::Fetch { id: id.to_string() };
-        if let Ok(Response::Blob(Some(hex))) = client::send_to_peer(&addr, token, &fetch).await
+        if let Ok(Response::Blob(Some(hex))) = client::send_to_peer(&addr, identity, &fetch).await
             && blobs::decode(&hex).is_ok_and(|data| kasagumo::ChunkId::of(&data).to_string() == id) {
                 return Ok(Response::Blob(Some(hex)));
             }
@@ -560,15 +561,15 @@ async fn repair(node: &Node) -> anyhow::Result<()> {
         }
     }
 
-    let token = node.token.as_deref().unwrap_or_default();
+    let identity = Some(&node.identity);
     for (addr, ids) in wanted {
-        let Ok(Response::Ids(missing)) = client::send_to_peer(&addr, token, &Request::Missing { ids }).await else {
+        let Ok(Response::Ids(missing)) = client::send_to_peer(&addr, identity, &Request::Missing { ids }).await else {
             continue;
         };
         for id in missing {
             if let Some(data) = node.blobs.get(&id)? {
                 let store = Request::Store { data: blobs::encode(&data) };
-                client::send_to_peer(&addr, token, &store).await.ok();
+                client::send_to_peer(&addr, identity, &store).await.ok();
             }
         }
     }

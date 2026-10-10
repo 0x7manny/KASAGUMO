@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -8,6 +7,7 @@ use tokio::net::{TcpStream, UnixStream};
 use rustls::pki_types::ServerName;
 
 use crate::daemon::socket_path;
+use crate::identity::Identity;
 use crate::protocol::{Request, Response};
 use crate::secure::{self, SessionKey};
 
@@ -34,8 +34,9 @@ pub async fn send_on(data_dir: &Path, on: Option<&str>, request: Request) -> any
     }
 }
 
-/// Envoie une requête à un nœud distant (`token` : secret du cluster, vide si inconnu), avec un délai maximum.
-pub async fn send_to_peer(addr: &str, token: &str, request: &Request) -> anyhow::Result<Response> {
+/// Envoie une requête à un nœud distant, avec un délai maximum. Sans `identity`, on reste anonyme
+/// (le pair ne répond alors qu'à `Info`) et on ne vérifie pas qui répond.
+pub async fn send_to_peer(addr: &str, identity: Option<&Identity>, request: &Request) -> anyhow::Result<Response> {
     let attempt = async {
         let tcp = TcpStream::connect(addr)
             .await
@@ -43,7 +44,7 @@ pub async fn send_to_peer(addr: &str, token: &str, request: &Request) -> anyhow:
         let name = ServerName::try_from(secure::SERVER_NAME)?;
         let tls = secure::connector()?.connect(name, tcp).await.with_context(|| format!("{addr} ne parle pas TLS"))?;
         let key = secure::session_key(tls.get_ref().1)?;
-        exchange(tls, Some((token, key)), request).await
+        exchange(tls, Some((identity, key)), request).await
     };
     let timeout = if matches!(request, Request::Store { .. } | Request::Fetch { .. }) { BLOB_TIMEOUT } else { PEER_TIMEOUT };
     tokio::time::timeout(timeout, attempt)
@@ -51,8 +52,8 @@ pub async fn send_to_peer(addr: &str, token: &str, request: &Request) -> anyhow:
         .map_err(|_| anyhow::anyhow!("{addr} ne répond pas"))?
 }
 
-/// `peer` : token du cluster et clé de session, pour la preuve échangée avant la requête.
-async fn exchange<S>(stream: S, peer: Option<(&str, SessionKey)>, request: &Request) -> anyhow::Result<Response>
+/// `peer` : identité éventuelle et clé de session, pour la preuve échangée avant la requête.
+async fn exchange<S>(stream: S, peer: Option<(Option<&Identity>, SessionKey)>, request: &Request) -> anyhow::Result<Response>
 where
     S: AsyncRead + AsyncWrite,
 {
@@ -60,8 +61,9 @@ where
     let mut writer = Box::pin(writer);
 
     let mut out = Vec::new();
-    if let Some((token, key)) = &peer {
-        writeln!(out, "{}", secure::proof(token, key, "client"))?;
+    if let Some((identity, key)) = &peer {
+        out.extend(identity.map(|i| i.handshake("client", key)).unwrap_or_default().into_bytes());
+        out.push(b'\n');
     }
     serde_json::to_writer(&mut out, request)?;
     out.push(b'\n');
@@ -69,11 +71,11 @@ where
     writer.flush().await?;
 
     let mut lines = BufReader::new(reader).lines();
-    if let Some((token, key)) = &peer {
+    if let Some((identity, key)) = &peer {
         let sent = lines.next_line().await?.unwrap_or_default();
         anyhow::ensure!(
-            token.is_empty() || secure::same(&sent, &secure::proof(token, key, "server")),
-            "le pair ne connaît pas le token du cluster"
+            identity.is_none_or(|i| i.verify(&sent, "server", key).is_some()),
+            "le pair n'est pas membre du cluster"
         );
     }
     let line = lines.next_line().await?.context("le nœud a fermé la connexion sans répondre")?;

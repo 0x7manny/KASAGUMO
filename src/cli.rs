@@ -24,6 +24,11 @@ pub enum Command {
         #[command(subcommand)]
         action: NodeAction,
     },
+    /// Créer un cluster ou y admettre des nœuds
+    Cluster {
+        #[command(subcommand)]
+        action: ClusterAction,
+    },
     /// Lister les nœuds disponibles
     Nodes,
     /// Lancer un workload
@@ -71,10 +76,6 @@ pub enum NodeAction {
         #[arg(long, default_value_t = 7070)]
         port: u16,
 
-        /// Secret partagé par les nœuds du cluster (sans lui, les pairs ne peuvent rien lancer)
-        #[arg(long, env = "KGO_TOKEN", hide_env_values = true)]
-        token: Option<String>,
-
         /// Délai entre deux battements de cœur vers les pairs (ms)
         #[arg(long, default_value_t = 5000)]
         heartbeat_ms: u64,
@@ -83,6 +84,24 @@ pub enum NodeAction {
     Join {
         /// Adresse du pair (ex : 192.168.1.10:7070)
         addr: String,
+    },
+    /// Afficher la clé publique de ce nœud, à donner à qui administre le cluster
+    Id,
+    /// Rejoindre un cluster avec le certificat délivré par `kgo cluster admit`
+    Enroll {
+        /// Certificat reçu
+        certificate: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ClusterAction {
+    /// Créer un cluster dont ce nœud est le premier membre
+    Init,
+    /// Délivrer le certificat d'un nœud (à lancer sur le nœud qui a créé le cluster)
+    Admit {
+        /// Clé publique du nœud, affichée par `kgo node id`
+        public_key: String,
     },
 }
 

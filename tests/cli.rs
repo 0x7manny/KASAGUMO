@@ -57,7 +57,34 @@ fn ps_sans_daemon_explique_quoi_faire() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("kgo node start"));
 }
 
-const TOKEN: &str = "secret";
+/// Crée un cluster dans `dir`, qui garde la clé servant à y admettre des nœuds.
+fn new_cluster(dir: &std::path::Path) -> std::path::PathBuf {
+    std::fs::remove_dir_all(dir).ok();
+    let out = kgo(&["--data-dir", dir.to_str().unwrap(), "cluster", "init"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    dir.to_path_buf()
+}
+
+/// Le cluster commun aux nœuds de ces tests.
+fn test_cluster() -> &'static std::path::Path {
+    static CLUSTER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    CLUSTER.get_or_init(|| new_cluster(&std::env::temp_dir().join(format!("kgo-cluster-{}", std::process::id())))).as_path()
+}
+
+/// Admet le nœud de `dir` dans le cluster de `cluster` (sans effet s'il en fait déjà partie).
+fn enroll(dir: &std::path::Path, cluster: &std::path::Path) {
+    if dir.join("cluster.pub").exists() {
+        return;
+    }
+    let run = |data_dir: &std::path::Path, args: &[&str]| {
+        let out = kgo(&[args, &["--data-dir", data_dir.to_str().unwrap()]].concat());
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let public_key = run(dir, &["node", "id"]);
+    let certificate = run(cluster, &["cluster", "admit", &public_key]);
+    run(dir, &["node", "enroll", &certificate]);
+}
 
 struct Daemon {
     dir: std::path::PathBuf,
@@ -68,20 +95,21 @@ struct Daemon {
 
 impl Daemon {
     fn start(dir: &std::path::Path) -> Self {
-        Self::start_with_docker(dir, true, TOKEN, 0)
+        Self::start_with_docker(dir, true, test_cluster(), 0)
     }
 
     /// Redémarre un nœud sur le port qu'il avait.
     fn start_on(dir: &std::path::Path, port: u16) -> Self {
-        Self::start_with_docker(dir, true, TOKEN, port)
+        Self::start_with_docker(dir, true, test_cluster(), port)
     }
 
     /// `containers_alive` : ce que répond le docker factice à `docker inspect`.
-    fn start_with_docker(dir: &std::path::Path, containers_alive: bool, token: &str, port: u16) -> Self {
+    fn start_with_docker(dir: &std::path::Path, containers_alive: bool, cluster: &std::path::Path, port: u16) -> Self {
         use std::io::BufRead;
         use std::os::unix::fs::PermissionsExt;
 
         std::fs::create_dir_all(dir).unwrap();
+        enroll(dir, cluster);
         let docker = dir.join("fake-docker.sh");
         let script = format!("#!/bin/sh\n[ \"$1\" = inspect ] && echo {containers_alive}\n[ \"$1\" = logs ] && echo hello-from-$4\nexit 0\n");
         std::fs::write(&docker, script).unwrap();
@@ -89,7 +117,6 @@ impl Daemon {
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_kgo"))
             .args(["node", "start", "--port", &port.to_string(), "--heartbeat-ms", "100", "--data-dir", dir.to_str().unwrap()])
-            .env("KGO_TOKEN", token)
             .env("KGO_DOCKER", &docker) // docker factice : toutes les commandes réussissent
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -182,12 +209,12 @@ fn cycle_de_vie_et_persistance() {
 }
 
 #[test]
-fn le_port_tcp_est_chiffre_et_exige_le_token() {
+fn le_port_tcp_est_chiffre_et_reserve_aux_membres() {
     use std::io::{Read, Write};
 
     let base = std::env::temp_dir().join(format!("kgo-tls-{}", std::process::id()));
     let a = Daemon::start(&base.join("a"));
-    let intrus = Daemon::start_with_docker(&base.join("intrus"), true, "autre", 0);
+    let intrus = Daemon::start_with_docker(&base.join("intrus"), true, &new_cluster(&base.join("autre-cluster")), 0);
 
     // en clair, le nœud ne répond rien d'exploitable
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", a.port)).unwrap();
@@ -197,13 +224,13 @@ fn le_port_tcp_est_chiffre_et_exige_le_token() {
     stream.read_to_end(&mut reply).ok();
     assert!(!String::from_utf8_lossy(&reply).contains("cpus"));
 
-    // un pair qui n'a pas le même token est rejeté, dans les deux sens
+    // un nœud d'un autre cluster est rejeté, dans les deux sens
     let on = format!("127.0.0.1:{}", a.port);
     let out = intrus.kgo(&["--on", &on, "ps"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("token"), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("membre du cluster"), "{}", text(&out.stderr));
     let out = a.kgo(&["--on", &format!("127.0.0.1:{}", intrus.port), "ps"]);
-    assert!(text(&out.stderr).contains("token"), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("membre du cluster"), "{}", text(&out.stderr));
 
     a.stop();
     intrus.stop();
@@ -249,7 +276,7 @@ fn reconciliation_au_redemarrage() {
 
     // le daemon redémarre alors que le conteneur a disparu : le workload devient failed
     daemon.stop();
-    let daemon = Daemon::start_with_docker(&dir, false, TOKEN, 0);
+    let daemon = Daemon::start_with_docker(&dir, false, test_cluster(), 0);
     assert!(text(&daemon.kgo(&["ps"]).stdout).contains("aucun workload"));
     let all = text(&daemon.kgo(&["ps", "--all"]).stdout);
     assert!(all.contains(&id) && all.contains("failed"), "{all}");
@@ -521,6 +548,33 @@ fn les_workloads_d_un_noeud_tombe_sont_repris_une_seule_fois() {
     wait_until("le workload n'a pas été repris", || running(&nodes) >= 1);
     std::thread::sleep(std::time::Duration::from_secs(1));
     assert_eq!(running(&nodes), 1);
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn les_commandes_de_cluster_sont_controlees() {
+    let base = std::env::temp_dir().join(format!("kgo-cluster-cmds-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let (a, b) = (base.join("a"), base.join("b"));
+    let dir = |d: &std::path::Path| d.to_str().unwrap().to_string();
+
+    // sans cluster, un nœud ne démarre pas
+    let out = kgo(&["node", "start", "--data-dir", &dir(&a)]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("aucun cluster"), "{}", text(&out.stderr));
+
+    // un cluster ne se crée qu'une fois, et seul son créateur admet des nœuds
+    assert!(kgo(&["cluster", "init", "--data-dir", &dir(&a)]).status.success());
+    assert_eq!(kgo(&["cluster", "init", "--data-dir", &dir(&a)]).status.code(), Some(1));
+    let public_key = text(&kgo(&["node", "id", "--data-dir", &dir(&b)]).stdout);
+    assert_eq!(kgo(&["cluster", "admit", public_key.trim(), "--data-dir", &dir(&b)]).status.code(), Some(1));
+
+    // un certificat n'est valable que pour le nœud auquel il est destiné
+    let certificate = text(&kgo(&["cluster", "admit", public_key.trim(), "--data-dir", &dir(&a)]).stdout);
+    let other = base.join("c");
+    assert_eq!(kgo(&["node", "enroll", certificate.trim(), "--data-dir", &dir(&other)]).status.code(), Some(1));
+    assert!(kgo(&["node", "enroll", certificate.trim(), "--data-dir", &dir(&b)]).status.success());
 
     std::fs::remove_dir_all(&base).ok();
 }

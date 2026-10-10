@@ -29,25 +29,6 @@ impl Store {
         Ok(Self { db })
     }
 
-    /// Identifiant stable du nœud, généré au premier démarrage.
-    pub fn node_id(&self) -> anyhow::Result<String> {
-        let tx = self.db.begin_write()?;
-        let id = {
-            let mut meta = tx.open_table(META)?;
-            let existing = meta.get("node_id")?.map(|v| v.value().to_string());
-            match existing {
-                Some(id) => id,
-                None => {
-                    let id = format!("{:016x}", rand::random::<u64>());
-                    meta.insert("node_id", id.as_str())?;
-                    id
-                }
-            }
-        };
-        tx.commit()?;
-        Ok(id)
-    }
-
     pub fn create(&self, spec: WorkloadSpec) -> anyhow::Result<Workload> {
         let tx = self.db.begin_write()?;
         let workload = {

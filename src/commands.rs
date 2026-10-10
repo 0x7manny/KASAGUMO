@@ -6,22 +6,39 @@ use kasagumo::{CHUNK_SIZE, ChunkId, FileManifest, FilePrimitive, chunk_path};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
-use crate::cli::{NodeAction, RunArgs};
+use crate::cli::{ClusterAction, NodeAction, RunArgs};
 use crate::blobs;
 use crate::protocol::{Request, Response};
 use crate::workload::WorkloadSpec;
-use crate::{client, daemon};
+use crate::{client, daemon, identity};
 
 pub async fn node(action: NodeAction, data_dir: &Path) -> anyhow::Result<()> {
     match action {
-        NodeAction::Start { port, token, heartbeat_ms } => daemon::serve(data_dir, port, token, Duration::from_millis(heartbeat_ms)).await,
+        NodeAction::Start { port, heartbeat_ms } => daemon::serve(data_dir, port, Duration::from_millis(heartbeat_ms)).await,
         NodeAction::Join { addr } => join(&addr, data_dir).await,
+        NodeAction::Id => {
+            println!("{}", identity::node_pubkey(data_dir)?);
+            Ok(())
+        }
+        NodeAction::Enroll { certificate } => {
+            let id = identity::enroll(data_dir, &certificate)?;
+            println!("nœud {id} : membre du cluster");
+            Ok(())
+        }
     }
+}
+
+pub fn cluster(action: ClusterAction, data_dir: &Path) -> anyhow::Result<()> {
+    match action {
+        ClusterAction::Init => println!("cluster créé, nœud {} : premier membre", identity::init_cluster(data_dir)?),
+        ClusterAction::Admit { public_key } => println!("{}", identity::admit(data_dir, &public_key)?),
+    }
+    Ok(())
 }
 
 async fn join(addr: &str, data_dir: &Path) -> anyhow::Result<()> {
     // le pair doit répondre avant d'être retenu
-    match client::send_to_peer(addr, "", &Request::Info).await? {
+    match client::send_to_peer(addr, None, &Request::Info).await? {
         Response::Info(info) => {
             match client::send(data_dir, &Request::AddPeer { addr: addr.to_string() }).await? {
                 Response::PeerAdded => println!("pair ajouté : {addr} (nœud {})", info.id),

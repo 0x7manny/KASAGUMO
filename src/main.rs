@@ -3,6 +3,7 @@ mod cli;
 mod client;
 mod commands;
 mod daemon;
+mod identity;
 mod protocol;
 mod runtime;
 mod secure;
@@ -21,6 +22,7 @@ async fn main() -> ExitCode {
 
     let result = match cli.command {
         Command::Node { action } => commands::node(action, &cli.data_dir).await,
+        Command::Cluster { action } => commands::cluster(action, &cli.data_dir),
         Command::Nodes => commands::nodes(&cli.data_dir).await,
         Command::Run(args) => commands::run(args, cli.on.as_deref(), &cli.data_dir).await,
         Command::Ps { all } => commands::ps(all, cli.on.as_deref(), &cli.data_dir).await,
