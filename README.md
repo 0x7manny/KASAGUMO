@@ -82,3 +82,5 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Tests start real nodes on your machine and replace Docker with a fake one, so they run without Docker.
+
+See [docs/architecture.md](docs/architecture.md) for how the daemon, scheduling, gossip, and block replication fit together, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
