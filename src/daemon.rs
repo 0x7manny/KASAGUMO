@@ -69,11 +69,17 @@ pub async fn serve(data_dir: &Path, port: u16, heartbeat: Duration) -> anyhow::R
     let unix = UnixListener::bind(&path)
         .with_context(|| format!("impossible d'ouvrir le socket {}", path.display()))?;
 
+    // mémoire inconnue : on reste prudent plutôt que de s'annoncer sans limite, sinon le
+    // planificateur choisirait toujours ce nœud et le surchargerait.
+    let memory = total_memory().await.unwrap_or_else(|| {
+        eprintln!("mémoire physique inconnue : on retient {} Mo par prudence", FALLBACK_MEMORY >> 20);
+        FALLBACK_MEMORY
+    });
     let info = NodeInfo {
         id: identity.node_id(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
-        memory: total_memory().await.unwrap_or(u64::MAX), // inconnue : pas de limite
+        memory,
         port,
         used_cpus: 0,
         used_memory: 0,
@@ -492,6 +498,10 @@ async fn release_orphans(node: &Node, addr: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Mémoire retenue quand la mémoire physique est indétectable : assez pour tourner, assez bas
+/// pour ne pas se faire préférer à tort par le planificateur.
+const FALLBACK_MEMORY: u64 = 1 << 30;
 
 /// Mémoire physique de la machine, via `/proc/meminfo` (Linux) ou `sysctl` (macOS).
 async fn total_memory() -> Option<u64> {
