@@ -399,10 +399,11 @@ async fn heartbeat(
     own: &mut HashSet<String>,
 ) -> anyhow::Result<()> {
     let identity = node.identity.clone();
+    let hosted = node.hosted()?; // le même pour tous les pairs : calculé une fois
     let mut probes = JoinSet::new();
     for addr in node.store.peers()?.into_iter().filter(|a| !own.contains(a)) {
         let identity = identity.clone();
-        let hello = Request::Hello { port: node.info.port, workloads: node.hosted()? };
+        let hello = Request::Hello { port: node.info.port, workloads: hosted.clone() };
         probes.spawn(async move { (client::send_to_peer(&addr, Some(&identity), &hello).await, addr) });
     }
     while let Some(probe) = probes.join_next().await {
@@ -516,12 +517,18 @@ async fn total_memory() -> Option<u64> {
 /// Nombre de copies de chaque bloc.
 const REPLICAS: usize = 2;
 
-/// Les nœuds joignables, classés par le hachage (id du bloc, id du nœud) : les `REPLICAS` premiers
-/// doivent détenir le bloc.
-async fn ranked_nodes(node: &Node, id: &str) -> anyhow::Result<Vec<(String, NodeInfo)>> {
-    let mut ranked: Vec<_> = nodes(node).await?.into_iter().filter_map(|n| Some((n.addr, n.info.ok()?))).collect();
+/// Les nœuds joignables du cluster (adresse + infos), le local compris. Un appel réseau à tous
+/// les pairs : à faire une fois par passe, pas une fois par bloc.
+async fn reachable_nodes(node: &Node) -> anyhow::Result<Vec<(String, NodeInfo)>> {
+    Ok(nodes(node).await?.into_iter().filter_map(|n| Some((n.addr, n.info.ok()?))).collect())
+}
+
+/// Classe les nœuds pour un bloc par le hachage (id du bloc, id du nœud) : les `REPLICAS` premiers
+/// doivent détenir le bloc. Purement local, à partir d'un classement déjà récupéré.
+fn rank_for(id: &str, nodes: &[(String, NodeInfo)]) -> Vec<(String, NodeInfo)> {
+    let mut ranked = nodes.to_vec();
     ranked.sort_by_cached_key(|(_, info)| Sha256::digest(format!("{id}{}", info.id)));
-    Ok(ranked)
+    ranked
 }
 
 /// Range le bloc sur les `REPLICAS` nœuds que le hachage (id du bloc, id du nœud) classe en tête ;
@@ -529,7 +536,7 @@ async fn ranked_nodes(node: &Node, id: &str) -> anyhow::Result<Vec<(String, Node
 async fn put(node: &Node, hex: &str) -> anyhow::Result<Response> {
     let data = blobs::decode(hex)?;
     let id = kasagumo::ChunkId::of(&data).to_string();
-    let ranked = ranked_nodes(node, &id).await?;
+    let ranked = rank_for(&id, &reachable_nodes(node).await?);
 
     let identity = Some(&node.identity);
     let mut copies = 0;
@@ -567,9 +574,10 @@ async fn get(node: &Node, id: &str) -> anyhow::Result<Response> {
 
 /// Remet chaque bloc local sur les nœuds qui doivent le détenir (après la chute d'un nœud ou l'arrivée d'un autre).
 async fn repair(node: &Node) -> anyhow::Result<()> {
+    let reachable = reachable_nodes(node).await?; // une seule interrogation du cluster pour toute la passe
     let mut wanted: HashMap<String, Vec<String>> = HashMap::new();
     for id in node.blobs.ids()? {
-        for (addr, info) in ranked_nodes(node, &id).await?.into_iter().take(REPLICAS) {
+        for (addr, info) in rank_for(&id, &reachable).into_iter().take(REPLICAS) {
             if info.id != node.info.id {
                 wanted.entry(addr).or_default().push(id.clone());
             }
