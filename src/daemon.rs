@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinSet;
@@ -126,6 +126,53 @@ fn spawn_handler(connection: impl Future<Output = anyhow::Result<()>> + Send + '
     });
 }
 
+/// Taille maximale d'une requête ou réponse : un bloc de 1 Mio part en hexadécimal (2 Mio) plus
+/// l'enveloppe JSON ; au-delà on coupe la connexion plutôt que de remplir la mémoire.
+const MAX_LINE: usize = 8 << 20;
+/// Un pair qui n'envoie rien pendant ce délai voit sa connexion fermée (anti-slowloris).
+const READ_IDLE: Duration = Duration::from_secs(30);
+
+/// Lit une ligne (sans le `\n` final, ni le `\r` qui le précède) en bornant l'attente et la taille.
+/// `Ok(None)` à la fermeture propre de la connexion.
+async fn read_line<R>(reader: &mut R) -> anyhow::Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut buf = Vec::new();
+    loop {
+        let (consumed, complete) = {
+            let chunk = tokio::time::timeout(READ_IDLE, reader.fill_buf())
+                .await
+                .map_err(|_| anyhow::anyhow!("pair silencieux, connexion fermée"))??;
+            if chunk.is_empty() {
+                return if buf.is_empty() { Ok(None) } else { Ok(Some(into_line(buf)?)) };
+            }
+            match chunk.iter().position(|&b| b == b'\n') {
+                Some(i) => {
+                    buf.extend_from_slice(&chunk[..i]);
+                    (i + 1, true)
+                }
+                None => {
+                    buf.extend_from_slice(chunk);
+                    (chunk.len(), false)
+                }
+            }
+        };
+        reader.consume(consumed);
+        if complete {
+            return Ok(Some(into_line(buf)?));
+        }
+        anyhow::ensure!(buf.len() <= MAX_LINE, "requête trop longue (plus de {} Mio)", MAX_LINE >> 20);
+    }
+}
+
+fn into_line(mut buf: Vec<u8>) -> anyhow::Result<String> {
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    Ok(String::from_utf8(buf)?)
+}
+
 /// `link` : clé de session TLS et adresse du pair, absentes sur le socket Unix.
 async fn handle<S>(stream: S, node: &Node, link: Option<(SessionKey, IpAddr)>) -> anyhow::Result<()>
 where
@@ -133,13 +180,13 @@ where
 {
     let (reader, writer) = tokio::io::split(stream);
     let mut writer = Box::pin(writer);
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
 
     // sur TCP, le pair ouvre par sa preuve d'identité, à quoi le nœud répond par la sienne
     let origin = match link {
         None => Origin::Local,
         Some((key, ip)) => {
-            let sent = lines.next_line().await?.unwrap_or_default();
+            let sent = read_line(&mut reader).await?.unwrap_or_default();
             writer.write_all(format!("{}\n", node.identity.handshake("server", &key)).as_bytes()).await?;
             writer.flush().await?;
             if node.identity.verify(&sent, "client", &key).is_some() {
@@ -150,7 +197,7 @@ where
         }
     };
 
-    while let Some(line) = lines.next_line().await? {
+    while let Some(line) = read_line(&mut reader).await? {
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request) => dispatch(request, node, origin).await,
             Err(e) => Response::Error(format!("requête invalide : {e}")),
