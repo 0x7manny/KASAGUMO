@@ -214,7 +214,7 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
     let allowed = match origin {
         Origin::Local => true,
         Origin::Peer(_) => {
-            !matches!(request, Request::Forward { .. } | Request::Schedule(_) | Request::Put { .. } | Request::Get { .. })
+            !matches!(request, Request::Forward { .. } | Request::Schedule(_) | Request::Put { .. } | Request::Get { .. } | Request::RemovePeer { .. })
         }
         Origin::Anonymous => matches!(request, Request::Info),
     };
@@ -230,6 +230,7 @@ async fn dispatch(request: Request, node: &Node, origin: Origin) -> Response {
         }
     let result = match request {
         Request::AddPeer { addr } => store.add_peer(&addr).map(|()| Response::PeerAdded),
+        Request::RemovePeer { addr } => store.remove_peer(&addr).map(|known| Response::PeerRemoved { known }),
         Request::Nodes => nodes(node).await.map(Response::Nodes),
         Request::Info => node.current_info().map(Response::Info),
         Request::Run(spec) => run(node, spec).map(Response::Started),

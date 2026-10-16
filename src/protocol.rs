@@ -55,6 +55,8 @@ pub enum Request {
     Get { id: String },
     Info,
     AddPeer { addr: String },
+    /// Oublie un pair (réservé au CLI local).
+    RemovePeer { addr: String },
     Nodes,
     /// Battement de cœur d'un pair : annonce son port d'écoute et les workloads qu'il héberge,
     /// reçoit les pairs connus.
@@ -79,6 +81,7 @@ pub enum Response {
     Ids(Vec<String>),
     Info(NodeInfo),
     PeerAdded,
+    PeerRemoved { known: bool },
     Peers(Vec<String>),
     Nodes(Vec<NodeStatus>),
     Error(String),

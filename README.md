@@ -60,6 +60,7 @@ kgo node id                                   # show this node's public key
 kgo node enroll <certificate>                 # join a cluster
 kgo node start --port 7070                    # start a node
 kgo node join <addr>                          # add a peer
+kgo node forget <addr>                        # remove a peer
 kgo nodes                                     # list nodes, free CPU and memory
 
 kgo run --cpu 2 --memory 4GB nginx:latest     # run a workload

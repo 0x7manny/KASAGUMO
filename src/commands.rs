@@ -16,6 +16,7 @@ pub async fn node(action: NodeAction, data_dir: &Path) -> anyhow::Result<()> {
     match action {
         NodeAction::Start { port, heartbeat_ms } => daemon::serve(data_dir, port, Duration::from_millis(heartbeat_ms)).await,
         NodeAction::Join { addr } => join(&addr, data_dir).await,
+        NodeAction::Forget { addr } => forget(&addr, data_dir).await,
         NodeAction::Id => {
             println!("{}", identity::node_pubkey(data_dir)?);
             Ok(())
@@ -47,6 +48,16 @@ async fn join(addr: &str, data_dir: &Path) -> anyhow::Result<()> {
             }
         }
         Response::Error(e) => anyhow::bail!("{addr} : {e}"),
+        other => anyhow::bail!("réponse inattendue : {other:?}"),
+    }
+    Ok(())
+}
+
+async fn forget(addr: &str, data_dir: &Path) -> anyhow::Result<()> {
+    match client::send(data_dir, &Request::RemovePeer { addr: addr.to_string() }).await? {
+        Response::PeerRemoved { known: true } => println!("pair oublié : {addr}"),
+        Response::PeerRemoved { known: false } => println!("{addr} n'était pas un pair connu"),
+        Response::Error(e) => anyhow::bail!("{e}"),
         other => anyhow::bail!("réponse inattendue : {other:?}"),
     }
     Ok(())

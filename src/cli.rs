@@ -85,6 +85,11 @@ pub enum NodeAction {
         /// Adresse du pair (ex : 192.168.1.10:7070)
         addr: String,
     },
+    /// Oublier un pair de la liste des pairs
+    Forget {
+        /// Adresse du pair (telle qu'affichée par `kgo nodes`)
+        addr: String,
+    },
     /// Afficher la clé publique de ce nœud, à donner à qui administre le cluster
     Id,
     /// Rejoindre un cluster avec le certificat délivré par `kgo cluster admit`

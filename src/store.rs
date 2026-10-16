@@ -185,6 +185,14 @@ impl Store {
         Ok(())
     }
 
+    /// Oublie un pair. Renvoie `false` s'il n'était pas connu.
+    pub fn remove_peer(&self, addr: &str) -> anyhow::Result<bool> {
+        let tx = self.db.begin_write()?;
+        let removed = tx.open_table(PEERS)?.remove(addr)?.is_some();
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn peers(&self) -> anyhow::Result<Vec<String>> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(PEERS)?;
