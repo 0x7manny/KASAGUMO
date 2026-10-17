@@ -11,6 +11,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
+use tracing::{error, info, warn};
 
 use crate::blobs::{self, Blobs};
 use crate::client;
@@ -47,6 +48,7 @@ enum Origin {
 }
 
 pub async fn serve(data_dir: &Path, port: u16, heartbeat: Duration) -> anyhow::Result<()> {
+    init_logging();
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("impossible de créer {}", data_dir.display()))?;
     let data_dir = std::fs::canonicalize(data_dir)?;
@@ -72,7 +74,7 @@ pub async fn serve(data_dir: &Path, port: u16, heartbeat: Duration) -> anyhow::R
     // mémoire inconnue : on reste prudent plutôt que de s'annoncer sans limite, sinon le
     // planificateur choisirait toujours ce nœud et le surchargerait.
     let memory = total_memory().await.unwrap_or_else(|| {
-        eprintln!("mémoire physique inconnue : on retient {} Mo par prudence", FALLBACK_MEMORY >> 20);
+        warn!("mémoire physique inconnue : on retient {} Mo par prudence", FALLBACK_MEMORY >> 20);
         FALLBACK_MEMORY
     });
     let info = NodeInfo {
@@ -87,9 +89,7 @@ pub async fn serve(data_dir: &Path, port: u16, heartbeat: Duration) -> anyhow::R
     let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, identity, takeover: Default::default(), tls: secure::acceptor()?, blobs: Blobs::open(data_dir.join("blobs"))? });
     reconcile(&node).await?;
     tokio::spawn(monitor(Arc::clone(&node), heartbeat));
-    println!("nœud {} démarré", node.info.id);
-    println!("socket : {}", path.display());
-    println!("tcp : 0.0.0.0:{port}");
+    info!(id = %node.info.id, socket = %path.display(), tcp = %format!("0.0.0.0:{port}"), "nœud démarré");
 
     let mut sigterm = signal(SignalKind::terminate())?;
     loop {
@@ -114,14 +114,22 @@ pub async fn serve(data_dir: &Path, port: u16, heartbeat: Duration) -> anyhow::R
     }
 
     std::fs::remove_file(&path).ok();
-    println!("nœud arrêté");
+    info!("nœud arrêté");
     Ok(())
+}
+
+/// Active les journaux (niveau `info` par défaut, ajustable par `RUST_LOG`). Sans effet si un
+/// abonné est déjà en place, pour ne pas gêner les tests.
+fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
 fn spawn_handler(connection: impl Future<Output = anyhow::Result<()>> + Send + 'static) {
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connexion en erreur : {e:#}");
+            warn!("connexion en erreur : {e:#}");
         }
     });
 }
@@ -380,7 +388,7 @@ async fn launch(store: Arc<Store>, workload: Workload) {
     }
     .await;
     if let Err(e) = outcome {
-        eprintln!("workload {} en échec : {e:#}", workload.id);
+        error!(workload = %workload.id, "workload en échec : {e:#}");
         store.advance(&workload.id, Pulling, Failed).ok();
     }
 }
@@ -394,7 +402,7 @@ async fn stop(node: &Node, id: &str) -> anyhow::Result<()> {
     // set_state échoue si le workload est inconnu : on ne touche pas à Docker dans ce cas
     node.store.set_state(id, WorkloadState::Stopped)?;
     if let Err(e) = node.runtime.stop(id).await {
-        eprintln!("arrêt du conteneur de {id} : {e:#}");
+        warn!("arrêt du conteneur de {id} : {e:#}");
     }
     Ok(())
 }
@@ -410,7 +418,7 @@ async fn reconcile(node: &Node) -> anyhow::Result<()> {
             Stopped | Failed => continue,
         };
         if !alive {
-            eprintln!("workload {} ({}) : {} → failed", w.id, w.spec.image, w.state);
+            warn!("workload {} ({}) : {} → failed", w.id, w.spec.image, w.state);
             node.store.advance(&w.id, w.state, Failed)?;
         }
     }
@@ -431,11 +439,11 @@ async fn monitor(node: Arc<Node>, interval: Duration) {
         tokio::time::sleep(interval).await;
         tick = tick.wrapping_add(1);
         if let Err(e) = heartbeat(&node, &mut misses, &mut own).await {
-            eprintln!("battement de cœur en erreur : {e:#}");
+            warn!("battement de cœur en erreur : {e:#}");
         }
         if tick.is_multiple_of(REPAIR_EVERY)
             && let Err(e) = repair(&node).await {
-                eprintln!("réparation des blocs en erreur : {e:#}");
+                warn!("réparation des blocs en erreur : {e:#}");
             }
     }
 }
@@ -484,7 +492,7 @@ async fn learn(node: &Node, addr: String, own: &mut HashSet<String>) -> anyhow::
         }
         Ok(Response::Info(info)) => {
             if !crate::protocol::versions_compatible(&node.info.version, &info.version) {
-                eprintln!("pair {addr} (nœud {}) en version {} incompatible avec {}", info.id, info.version, node.info.version);
+                warn!("pair {addr} (nœud {}) en version {} incompatible avec {}", info.id, info.version, node.info.version);
             }
             node.store.add_peer(&addr)?;
         }
@@ -522,11 +530,11 @@ async fn takeover(node: &Node, dead: &str, lost: Vec<(String, WorkloadSpec)>) ->
         if !done.contains(&id) {
             match schedule(node, spec).await? {
                 Response::Placed { addr, workload } => {
-                    eprintln!("workload {id} : {dead} est tombé, relancé sur {addr} ({})", workload.id);
+                    info!("workload {id} : {dead} est tombé, relancé sur {addr} ({})", workload.id);
                     node.store.orphan(&id, dead)?;
                 }
                 other => {
-                    eprintln!("workload {id} : replacement impossible ({other:?})");
+                    warn!("workload {id} : replacement impossible ({other:?})");
                     continue;
                 }
             }
