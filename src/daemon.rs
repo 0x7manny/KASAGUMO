@@ -482,7 +482,12 @@ async fn learn(node: &Node, addr: String, own: &mut HashSet<String>) -> anyhow::
         Ok(Response::Info(info)) if info.id == node.info.id => {
             own.insert(addr);
         }
-        Ok(Response::Info(_)) => node.store.add_peer(&addr)?,
+        Ok(Response::Info(info)) => {
+            if !crate::protocol::versions_compatible(&node.info.version, &info.version) {
+                eprintln!("pair {addr} (nœud {}) en version {} incompatible avec {}", info.id, info.version, node.info.version);
+            }
+            node.store.add_peer(&addr)?;
+        }
         _ => {}
     }
     Ok(())

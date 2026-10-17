@@ -2,6 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::workload::{Workload, WorkloadSpec};
 
+/// Deux nœuds parlent le même protocole s'ils partagent la version majeure — ou, avant la 1.0,
+/// la même version mineure (convention semver : tout peut casser entre deux `0.x`).
+pub fn versions_compatible(a: &str, b: &str) -> bool {
+    fn key(v: &str) -> (u64, u64) {
+        let mut parts = v.split(['.', '-', '+']).map(|p| p.parse::<u64>().unwrap_or(0));
+        let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+        if major == 0 { (0, minor) } else { (major, 0) }
+    }
+    key(a) == key(b)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub id: String,
@@ -85,4 +96,17 @@ pub enum Response {
     Peers(Vec<String>),
     Nodes(Vec<NodeStatus>),
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::versions_compatible;
+
+    #[test]
+    fn compatibilite_des_versions() {
+        assert!(versions_compatible("0.1.0", "0.1.3"), "même mineure avant 1.0");
+        assert!(!versions_compatible("0.1.0", "0.2.0"), "mineure différente avant 1.0");
+        assert!(versions_compatible("1.2.0", "1.9.4"), "même majeure");
+        assert!(!versions_compatible("1.0.0", "2.0.0"), "majeure différente");
+    }
 }

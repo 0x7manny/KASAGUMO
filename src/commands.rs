@@ -42,7 +42,13 @@ async fn join(addr: &str, data_dir: &Path) -> anyhow::Result<()> {
     match client::send_to_peer(addr, None, &Request::Info).await? {
         Response::Info(info) => {
             match client::send(data_dir, &Request::AddPeer { addr: addr.to_string() }).await? {
-                Response::PeerAdded => println!("pair ajouté : {addr} (nœud {})", info.id),
+                Response::PeerAdded => {
+                    println!("pair ajouté : {addr} (nœud {})", info.id);
+                    if let Response::Info(local) = client::send(data_dir, &Request::Info).await?
+                        && !crate::protocol::versions_compatible(&local.version, &info.version) {
+                            eprintln!("attention : {addr} est en version {} et ce nœud en {}", info.version, local.version);
+                        }
+                }
                 Response::Error(e) => anyhow::bail!("{e}"),
                 other => anyhow::bail!("réponse inattendue : {other:?}"),
             }
