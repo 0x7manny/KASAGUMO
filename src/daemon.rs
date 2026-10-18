@@ -17,7 +17,7 @@ use crate::blobs::{self, Blobs};
 use crate::client;
 use crate::identity::Identity;
 use crate::protocol::{NodeInfo, NodeStatus, Request, Response};
-use crate::runtime::DockerRuntime;
+use crate::runtime::{DockerRuntime, Runtime};
 use crate::secure::{self, SessionKey};
 use crate::store::Store;
 use crate::workload::{Placement, Workload, WorkloadSpec, WorkloadState};
@@ -87,7 +87,7 @@ pub async fn serve(data_dir: &Path, port: u16, heartbeat: Duration) -> anyhow::R
         used_memory: 0,
     };
     let node = Arc::new(Node { store: Arc::new(store), runtime: DockerRuntime, info, identity, takeover: Default::default(), tls: secure::acceptor()?, blobs: Blobs::open(data_dir.join("blobs"))? });
-    reconcile(&node).await?;
+    reconcile(&node.store, &node.runtime).await?;
     tokio::spawn(monitor(Arc::clone(&node), heartbeat));
     info!(id = %node.info.id, socket = %path.display(), tcp = %format!("0.0.0.0:{port}"), "nœud démarré");
 
@@ -305,7 +305,7 @@ fn run(node: &Node, spec: WorkloadSpec) -> anyhow::Result<Workload> {
         info.free_memory() >> 20
     );
     let workload = node.store.create(spec)?;
-    tokio::spawn(launch(Arc::clone(&node.store), workload.clone()));
+    tokio::spawn(launch(Arc::clone(&node.store), node.runtime, workload.clone()));
     Ok(workload)
 }
 
@@ -371,18 +371,18 @@ async fn nodes(node: &Node) -> anyhow::Result<Vec<NodeStatus>> {
     Ok(statuses)
 }
 
-/// Fait avancer un workload : Pending → Pulling → Running, ou Failed si Docker échoue.
-async fn launch(store: Arc<Store>, workload: Workload) {
+/// Fait avancer un workload : Pending → Pulling → Running, ou Failed si le runtime échoue.
+async fn launch<R: Runtime>(store: Arc<Store>, runtime: R, workload: Workload) {
     use WorkloadState::*;
     let outcome = async {
         if !store.advance(&workload.id, Pending, Pulling)? {
             return Ok(());
         }
-        DockerRuntime.pull(&workload.spec.image).await?;
-        DockerRuntime.start(&workload).await?;
+        runtime.pull(&workload.spec.image).await?;
+        runtime.start(&workload).await?;
         if !store.advance(&workload.id, Pulling, Running)? {
             // arrêté pendant le démarrage : le conteneur vient d'être créé, on le retire
-            DockerRuntime.stop(&workload.id).await?;
+            runtime.stop(&workload.id).await?;
         }
         anyhow::Ok(())
     }
@@ -409,17 +409,17 @@ async fn stop(node: &Node, id: &str) -> anyhow::Result<()> {
 
 /// Remet la base en accord avec la réalité après un redémarrage du daemon :
 /// un démarrage interrompu ou un conteneur disparu ne sont plus « actifs ».
-async fn reconcile(node: &Node) -> anyhow::Result<()> {
+async fn reconcile<R: Runtime>(store: &Store, runtime: &R) -> anyhow::Result<()> {
     use WorkloadState::*;
-    for w in node.store.list()? {
+    for w in store.list()? {
         let alive = match w.state {
             Pending | Pulling => false,
-            Running => node.runtime.is_running(&w.id).await,
+            Running => runtime.is_running(&w.id).await,
             Stopped | Failed => continue,
         };
         if !alive {
             warn!("workload {} ({}) : {} → failed", w.id, w.spec.image, w.state);
-            node.store.advance(&w.id, w.state, Failed)?;
+            store.advance(&w.id, w.state, Failed)?;
         }
     }
     Ok(())

@@ -30,34 +30,46 @@ pub fn run_args(workload: &Workload) -> Vec<String> {
     args
 }
 
+/// Pilote de conteneurs. Derrière un trait pour que la machine à états des workloads
+/// (`launch`, `reconcile`) se teste sans Docker, avec une implémentation factice.
+pub trait Runtime: Send + Sync + 'static {
+    fn pull(&self, image: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn start(&self, workload: &Workload) -> impl Future<Output = anyhow::Result<()>> + Send;
+    /// Vrai si le conteneur du workload existe et tourne.
+    fn is_running(&self, workload_id: &str) -> impl Future<Output = bool> + Send;
+    /// Les dernières lignes de sortie du conteneur.
+    fn logs(&self, workload_id: &str) -> impl Future<Output = anyhow::Result<String>> + Send;
+    fn stop(&self, workload_id: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+}
+
 /// Exécute les workloads en pilotant la CLI `docker` (remplaçable via `KGO_DOCKER`).
+#[derive(Clone, Copy)]
 pub struct DockerRuntime;
 
-impl DockerRuntime {
-    pub async fn pull(&self, image: &str) -> anyhow::Result<()> {
+impl Runtime for DockerRuntime {
+    async fn pull(&self, image: &str) -> anyhow::Result<()> {
         docker(["pull", image]).await.map(drop)
     }
 
-    pub async fn start(&self, workload: &Workload) -> anyhow::Result<()> {
+    async fn start(&self, workload: &Workload) -> anyhow::Result<()> {
         docker(run_args(workload)).await.map(drop)
     }
 
-    /// Vrai si le conteneur du workload existe et tourne.
-    pub async fn is_running(&self, workload_id: &str) -> bool {
+    async fn is_running(&self, workload_id: &str) -> bool {
         let name = container_name(workload_id);
         docker(["inspect", "--format", "{{.State.Running}}", name.as_str()])
             .await
             .is_ok_and(|out| out == "true")
     }
 
-    /// Les dernières lignes de sortie du conteneur (stdout puis stderr).
-    pub async fn logs(&self, workload_id: &str) -> anyhow::Result<String> {
+    /// stdout puis stderr.
+    async fn logs(&self, workload_id: &str) -> anyhow::Result<String> {
         let name = container_name(workload_id);
         let output = run_docker(["logs", "--tail", "200", name.as_str()]).await?;
         Ok(String::from_utf8_lossy(&[output.stdout, output.stderr].concat()).into_owned())
     }
 
-    pub async fn stop(&self, workload_id: &str) -> anyhow::Result<()> {
+    async fn stop(&self, workload_id: &str) -> anyhow::Result<()> {
         let name = container_name(workload_id);
         docker(["rm", "--force", name.as_str()]).await.map(drop)
     }
